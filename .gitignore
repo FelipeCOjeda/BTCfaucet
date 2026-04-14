@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Database
+faucet.db
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Sistema
+.DS_Store
+*.log

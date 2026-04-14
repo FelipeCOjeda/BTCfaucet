@@ -1,0 +1,15 @@
+[Unit]
+Description=Satoshi LN Faucet
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/ln-faucet
+EnvironmentFile=/opt/ln-faucet/.env
+ExecStart=/opt/ln-faucet/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8420
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

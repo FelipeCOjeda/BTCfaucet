@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="coinzilla" content="8d43dd70af64658c7a5ff60a7a7c31fa" />
+<title>⚡ Satoshi Faucet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Bebas+Neue&family=Manrope:wght@400;600;800&display=swap" rel="stylesheet"/>
+<script src="https://js.hcaptcha.com/1/api.js?render=explicit&onload=onHcaptchaLoad" async defer></script>
+<style>
+  :root {
+    --orange:#f7931a;--orange2:#ff6b00;--black:#080808;--dark:#0f0f0f;
+    --panel:#141414;--border:#222;--muted:#444;--text:#e8e8e8;--dim:#888;
+    --green:#00e676;--red:#ff3d3d;
+    --mono:'Share Tech Mono',monospace;--display:'Bebas Neue',sans-serif;--body:'Manrope',sans-serif;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--black);color:var(--text);font-family:var(--body);min-height:100vh;overflow-x:hidden;cursor:crosshair}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(247,147,26,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(247,147,26,.04) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+  body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.15) 2px,rgba(0,0,0,.15) 4px);pointer-events:none;z-index:0}
+  header{position:relative;z-index:10;border-bottom:1px solid var(--border);padding:14px 32px;display:flex;align-items:center;justify-content:space-between;background:rgba(8,8,8,.9);backdrop-filter:blur(8px)}
+  .logo{font-family:var(--display);font-size:1.6rem;letter-spacing:.12em;color:var(--orange);text-shadow:0 0 20px rgba(247,147,26,.4);display:flex;align-items:center;gap:10px}
+  .logo svg{width:28px;height:28px}
+  .header-right{display:flex;align-items:center;gap:16px}
+  .header-stats{display:flex;gap:24px;font-family:var(--mono);font-size:.72rem;color:var(--dim)}
+  .header-stats span{color:var(--orange)}
+  /* ── Lang switcher ── */
+  .lang-switcher{display:flex;gap:4px}
+  .lang-btn{font-family:var(--mono);font-size:.65rem;letter-spacing:.08em;padding:4px 8px;border:1px solid var(--border);background:transparent;color:var(--dim);cursor:pointer;transition:all .15s}
+  .lang-btn:hover{color:var(--orange);border-color:var(--orange)}
+  .lang-btn.active{color:var(--black);background:var(--orange);border-color:var(--orange)}
+  .ad-banner{position:relative;z-index:10;display:flex;justify-content:center;padding:12px;background:rgba(20,20,20,.6);border-bottom:1px solid var(--border)}
+  main{position:relative;z-index:10;max-width:520px;margin:0 auto;padding:48px 20px 80px}
+  .hero{text-align:center;margin-bottom:40px}
+  .hero-badge{display:inline-block;font-family:var(--mono);font-size:.68rem;letter-spacing:.2em;color:var(--orange);background:rgba(247,147,26,.08);border:1px solid rgba(247,147,26,.25);padding:4px 14px;margin-bottom:18px;text-transform:uppercase}
+  .hero h1{font-family:var(--display);font-size:clamp(3.5rem,10vw,5.5rem);letter-spacing:.06em;line-height:.9;color:var(--text);margin-bottom:6px}
+  .hero h1 em{color:var(--orange);font-style:normal;text-shadow:0 0 40px rgba(247,147,26,.35)}
+  .hero p{font-size:.88rem;color:var(--dim);margin-top:14px;line-height:1.6}
+  .amount-display{display:flex;align-items:center;justify-content:center;gap:16px;margin:28px 0;padding:20px;border:1px solid var(--border);background:var(--panel);position:relative;overflow:hidden}
+  .amount-display::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--orange),transparent);animation:scanline 3s ease-in-out infinite}
+  @keyframes scanline{0%,100%{opacity:.3}50%{opacity:1}}
+  .amount-number{font-family:var(--display);font-size:4rem;color:var(--orange);text-shadow:0 0 30px rgba(247,147,26,.5);line-height:1;animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{text-shadow:0 0 30px rgba(247,147,26,.5)}50%{text-shadow:0 0 50px rgba(247,147,26,.9),0 0 80px rgba(247,147,26,.3)}}
+  .amount-unit{font-family:var(--mono);font-size:.85rem;color:var(--dim);letter-spacing:.1em}
+  .amount-unit .big{font-size:1.2rem;color:var(--text);display:block}
+  .card{background:var(--panel);border:1px solid var(--border);padding:32px;position:relative}
+  .card::after{content:'';position:absolute;inset:-1px;border:1px solid transparent;background:linear-gradient(135deg,rgba(247,147,26,.15),transparent 60%) border-box;pointer-events:none}
+  .field-label{font-family:var(--mono);font-size:.7rem;letter-spacing:.15em;color:var(--dim);text-transform:uppercase;margin-bottom:8px;display:block}
+  .input-wrap{position:relative;margin-bottom:20px}
+  input[type="text"]{width:100%;background:var(--dark);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:.95rem;padding:14px 16px 14px 44px;outline:none;transition:border-color .2s,box-shadow .2s;-webkit-appearance:none}
+  input[type="text"]:focus{border-color:var(--orange);box-shadow:0 0 0 1px rgba(247,147,26,.2),inset 0 0 20px rgba(247,147,26,.03)}
+  input[type="text"]::placeholder{color:var(--muted)}
+  .input-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:1rem;pointer-events:none;transition:color .2s}
+  input:focus~.input-icon{color:var(--orange)}
+  .input-status{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:.75rem;font-family:var(--mono)}
+  .captcha-wrap{margin-bottom:20px;display:flex;justify-content:center}
+  .btn-claim{width:100%;padding:16px;background:var(--orange);color:var(--black);border:none;font-family:var(--display);font-size:1.4rem;letter-spacing:.12em;cursor:pointer;position:relative;overflow:hidden;transition:transform .1s,background .2s}
+  .btn-claim:hover:not(:disabled){background:var(--orange2);transform:translateY(-1px)}
+  .btn-claim:active:not(:disabled){transform:translateY(0)}
+  .btn-claim:disabled{background:var(--muted);cursor:not-allowed;color:var(--dim)}
+  .btn-claim .btn-shimmer{position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.25),transparent);animation:shimmer 2.5s ease-in-out infinite}
+  @keyframes shimmer{0%{left:-60%}100%{left:120%}}
+  .status-msg{margin-top:18px;padding:14px 16px;font-family:var(--mono);font-size:.82rem;line-height:1.6;display:none;border-left:3px solid;animation:fadeIn .3s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+  .status-msg.success{display:block;border-color:var(--green);background:rgba(0,230,118,.06);color:var(--green)}
+  .status-msg.error{display:block;border-color:var(--red);background:rgba(255,61,61,.06);color:var(--red)}
+  .status-msg.info{display:block;border-color:var(--orange);background:rgba(247,147,26,.06);color:var(--orange)}
+  .cooldown-bar{margin-top:14px;display:none}
+  .cooldown-bar.visible{display:block}
+  .cooldown-label{font-family:var(--mono);font-size:.68rem;color:var(--dim);letter-spacing:.1em;margin-bottom:6px;display:flex;justify-content:space-between}
+  .cooldown-track{height:3px;background:var(--border);overflow:hidden}
+  .cooldown-fill{height:100%;background:linear-gradient(90deg,var(--orange2),var(--orange));transition:width 1s linear}
+  .info-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);margin-top:2px;border:1px solid var(--border)}
+  .info-item{background:var(--panel);padding:16px;text-align:center}
+  .info-item .val{font-family:var(--display);font-size:1.6rem;color:var(--orange);display:block;line-height:1}
+  .info-item .lbl{font-family:var(--mono);font-size:.62rem;color:var(--dim);letter-spacing:.1em;margin-top:4px;display:block;text-transform:uppercase}
+  .how{margin-top:40px;border:1px solid var(--border);background:var(--panel);padding:24px}
+  .how-title{font-family:var(--display);font-size:1.3rem;letter-spacing:.1em;color:var(--orange);margin-bottom:18px}
+  .step{display:flex;gap:14px;margin-bottom:16px;align-items:flex-start}
+  .step-num{font-family:var(--mono);font-size:.75rem;color:var(--black);background:var(--orange);width:22px;height:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+  .step-text{font-size:.83rem;color:var(--dim);line-height:1.5}
+  .step-text strong{color:var(--text)}
+  .ad-mid{position:relative;z-index:10;display:flex;justify-content:center;margin:32px 0 0}
+  footer{position:relative;z-index:10;border-top:1px solid var(--border);padding:28px 32px;font-family:var(--mono);font-size:.68rem;color:var(--muted);display:flex;flex-direction:column;gap:16px}
+  .footer-top{display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:12px}
+  .footer-links a{color:var(--muted);text-decoration:none;margin-left:20px}
+  .footer-links a:hover{color:var(--orange)}
+  .footer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;width:100%}
+  .footer-item{display:flex;flex-direction:column;gap:5px}
+  .footer-item-label{font-size:.62rem;letter-spacing:.12em;color:var(--dim);text-transform:uppercase}
+  .footer-item a,.footer-item span{color:var(--orange);font-size:.72rem;text-decoration:none}
+  .footer-item a:hover{text-decoration:underline}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(0,0,0,.3);border-top-color:var(--black);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes bolt{0%,100%{opacity:1;filter:brightness(1)}50%{opacity:.7;filter:brightness(1.5)}}
+  .bolt-anim{animation:bolt 1.5s ease-in-out infinite}
+  .btn-guide-trigger{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;color:var(--orange);background:rgba(247,147,26,.08);border:1px solid rgba(247,147,26,.25);padding:8px 16px;cursor:pointer;text-transform:uppercase;margin:0 auto 32px;width:fit-content;transition:background .2s;text-decoration:none}
+  .btn-guide-trigger:hover{background:rgba(247,147,26,.15)}
+  @media(max-width:600px){header{padding:12px 16px}.header-stats{display:none}main{padding:32px 16px 60px}.card{padding:22px}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 3 L9 16 L15 16 L11 29 L26 12 L19 12 L23 3 Z" fill="#f7931a" stroke="#f7931a" stroke-width="1"/>
+    </svg>
+    SATOSHI FAUCET
+  </div>
+  <div class="header-right">
+    <div class="header-stats">
+      <div data-i18n="hdr_paid">TOTAL PAGO <span id="hdr-sats">…</span> SATS</div>
+      <div data-i18n="hdr_claims">CLAIMS <span id="hdr-claims">…</span></div>
+      <div>⚡ ONLINE</div>
+    </div>
+    <div class="lang-switcher">
+      <button class="lang-btn active" onclick="setLang('pt')">PT</button>
+      <button class="lang-btn" onclick="setLang('en')">EN</button>
+      <button class="lang-btn" onclick="setLang('es')">ES</button>
+    </div>
+  </div>
+</header>
+
+<div class="ad-banner">
+  <!-- <script async src="//cdn.coinzilla.io/js/czlla.min.js" data-zone="ZONE_ID"></script> -->
+  <div style="font-family:'Share Tech Mono',monospace;font-size:.65rem;color:#333;letter-spacing:.1em">[ COINZILLA AD ZONE ]</div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="hero-badge" data-i18n="badge">⚡ Lightning Network Faucet</div>
+    <h1 data-i18n="hero_title">GRÁTIS<br/><em>BITCOIN</em></h1>
+    <p data-i18n="hero_desc">Insira seu Lightning Address, resolva o captcha<br/>e receba sats instantaneamente — sem cadastro.</p>
+  </div>
+
+  <a class="btn-guide-trigger" href="/guia.html">
+    &#x1F4D6; <span data-i18n="guide_btn">Iniciante? Comece por aqui</span>
+  </a>
+
+  <div class="amount-display">
+    <div class="amount-number bolt-anim" id="faucet-amount">21</div>
+    <div class="amount-unit">
+      <span class="big">SATS</span>
+      <span data-i18n="every24h">a cada 24 horas</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <label class="field-label" for="ln-address" data-i18n="field_label">⚡ Lightning Address</label>
+    <div class="input-wrap">
+      <span class="input-icon">@</span>
+      <input type="text" id="ln-address" data-i18n-placeholder="placeholder" placeholder="voce@wallet.satoshi" autocomplete="off" spellcheck="false"/>
+      <span class="input-status" id="addr-status"></span>
+    </div>
+    <div class="captcha-wrap">
+      <div class="h-captcha" id="hcaptcha-widget" data-theme="dark" data-size="normal"></div>
+    </div>
+    <button class="btn-claim" id="btn-claim" onclick="doClaim()">
+      <span class="btn-shimmer"></span>
+      <span data-i18n="claim_btn">RECEBER SATS</span>
+    </button>
+    <div class="status-msg" id="status-msg"></div>
+    <div class="cooldown-bar" id="cooldown-bar">
+      <div class="cooldown-label">
+        <span data-i18n="next_claim">PRÓXIMO CLAIM</span>
+        <span id="cooldown-timer">—</span>
+      </div>
+      <div class="cooldown-track"><div class="cooldown-fill" id="cooldown-fill" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="info-strip">
+    <div class="info-item"><span class="val" id="stat-amount">21</span><span class="lbl" data-i18n="stat_sats">SATS / CLAIM</span></div>
+    <div class="info-item"><span class="val">24H</span><span class="lbl" data-i18n="stat_cooldown">COOLDOWN</span></div>
+    <div class="info-item"><span class="val" id="stat-total">0</span><span class="lbl" data-i18n="stat_claims">CLAIMS HOJE</span></div>
+  </div>
+
+  <div class="ad-mid">
+    <!-- <script async src="//cdn.coinzilla.io/js/czlla.min.js" data-zone="ZONE_ID_2"></script> -->
+    <div style="font-family:'Share Tech Mono',monospace;font-size:.65rem;color:#222;letter-spacing:.1em;border:1px solid #1a1a1a;padding:10px 24px">[ COINZILLA AD ZONE 2 ]</div>
+  </div>
+
+  <div class="how">
+    <div class="how-title" data-i18n="how_title">// COMO FUNCIONA</div>
+    <div class="step"><div class="step-num">1</div><div class="step-text" data-i18n="how1"><strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Phoenix, Breez, Alby...)</div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-text" data-i18n="how2"><strong>Resolva o captcha</strong> — prova de humanidade via hCaptcha</div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-text" data-i18n="how3"><strong>Receba os sats instantaneamente</strong> — pagamento Lightning direto para sua wallet</div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-text" data-i18n="how4"><strong>Aguarde 24 horas</strong> — o mesmo address fica bloqueado por 24h para evitar abusos</div></div>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-top">
+    <div>SATOSHI FAUCET // POWERED BY LIGHTNING NETWORK</div>
+    <div class="footer-links">
+      <a href="https://lightning.network" target="_blank" data-i18n="what_ln">O QUE É LN?</a>
+      <a href="https://hcaptcha.com" target="_blank">CAPTCHA</a>
+    </div>
+  </div>
+  <div style="width:100%;height:1px;background:var(--border)"></div>
+  <div class="footer-grid">
+    <div class="footer-item">
+      <span class="footer-item-label" data-i18n="donate_label">⚡ Doações</span>
+      <a href="lightning:donate&#64;lnvoltz.com" title="Abrir wallet para doar">donate&#64;lnvoltz.com</a>
+    </div>
+    <div class="footer-item">
+      <span class="footer-item-label" data-i18n="buy_label">₿ Comprar Bitcoin com PIX</span>
+      <a href="https://t.me/SATSfaction_bot?start=ref_159770042" target="_blank">&#64;SATSfaction_bot</a>
+    </div>
+    <div class="footer-item">
+      <span class="footer-item-label" data-i18n="register_label">⛓ Registrar na Blockchain</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://eternize.st" target="_blank">eternize.st</a>
+        <span style="color:var(--muted)">|</span>
+        <a href="https://t.me/BTCopreturn_bot" target="_blank">&#64;BTCopreturn_bot</a>
+      </div>
+    </div>
+    <div class="footer-item">
+      <span class="footer-item-label" data-i18n="dl_label">▶ Baixar vídeos sem Ads</span>
+      <a href="https://t.me/LNdownloadbot" target="_blank">&#64;LNdownloadbot</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// ── i18n ──────────────────────────────────────────────────────────────────────
+const LANGS = {
+  pt: {
+    badge:'⚡ Lightning Network Faucet',
+    hero_title:'GRÁTIS<br/><em>BITCOIN</em>',
+    hero_desc:'Insira seu Lightning Address, resolva o captcha<br/>e receba sats instantaneamente — sem cadastro.',
+    guide_btn:'Iniciante? Comece por aqui',
+    every24h:'a cada 24 horas',
+    field_label:'⚡ Lightning Address',
+    placeholder:'voce@wallet.satoshi',
+    claim_btn:'RECEBER SATS',
+    next_claim:'PRÓXIMO CLAIM',
+    stat_sats:'SATS / CLAIM',
+    stat_cooldown:'COOLDOWN',
+    stat_claims:'CLAIMS HOJE',
+    how_title:'// COMO FUNCIONA',
+    how1:'<strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how2:'<strong>Resolva o captcha</strong> — prova de humanidade via hCaptcha',
+    how3:'<strong>Receba os sats instantaneamente</strong> — pagamento Lightning direto para sua wallet',
+    how4:'<strong>Aguarde 24 horas</strong> — o mesmo address fica bloqueado por 24h para evitar abusos',
+    what_ln:'O QUE É LN?',
+    donate_label:'⚡ Doações',
+    buy_label:'₿ Comprar Bitcoin com PIX',
+    register_label:'⛓ Registrar na Blockchain',
+    dl_label:'▶ Baixar vídeos sem Ads',
+    hdr_paid:'TOTAL PAGO <span id="hdr-sats">…</span> SATS',
+    hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
+    err_address:'⚠ Insira seu Lightning Address',
+    err_format:'⚠ Formato inválido — use algo@wallet.com',
+    err_captcha:'⚠ Complete o captcha primeiro',
+    err_network:'✗ Erro de rede — tente novamente',
+    processing:'PROCESSANDO...',
+    wait:'⛔ AGUARDE 24H',
+    blocked:'⛔ bloqueado',
+    ok:'✓ ok',
+  },
+  en: {
+    badge:'⚡ Lightning Network Faucet',
+    hero_title:'FREE<br/><em>BITCOIN</em>',
+    hero_desc:'Enter your Lightning Address, solve the captcha<br/>and receive sats instantly — no sign-up needed.',
+    guide_btn:'Beginner? Start here',
+    every24h:'every 24 hours',
+    field_label:'⚡ Lightning Address',
+    placeholder:'you@wallet.satoshi',
+    claim_btn:'CLAIM SATS',
+    next_claim:'NEXT CLAIM',
+    stat_sats:'SATS / CLAIM',
+    stat_cooldown:'COOLDOWN',
+    stat_claims:'CLAIMS TODAY',
+    how_title:'// HOW IT WORKS',
+    how1:'<strong>Enter your Lightning Address</strong> — any compatible wallet (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how2:'<strong>Solve the captcha</strong> — proof of humanity via hCaptcha',
+    how3:'<strong>Receive sats instantly</strong> — Lightning payment directly to your wallet',
+    how4:'<strong>Wait 24 hours</strong> — the same address is blocked for 24h to prevent abuse',
+    what_ln:'WHAT IS LN?',
+    donate_label:'⚡ Donations',
+    buy_label:'₿ Buy Bitcoin',
+    register_label:'⛓ Register on Blockchain',
+    dl_label:'▶ Download videos without Ads',
+    hdr_paid:'TOTAL PAID <span id="hdr-sats">…</span> SATS',
+    hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
+    err_address:'⚠ Enter your Lightning Address',
+    err_format:'⚠ Invalid format — use something@wallet.com',
+    err_captcha:'⚠ Please complete the captcha first',
+    err_network:'✗ Network error — please try again',
+    processing:'PROCESSING...',
+    wait:'⛔ WAIT 24H',
+    blocked:'⛔ blocked',
+    ok:'✓ ok',
+  },
+  es: {
+    badge:'⚡ Lightning Network Faucet',
+    hero_title:'GRATIS<br/><em>BITCOIN</em>',
+    hero_desc:'Ingresa tu Lightning Address, resuelve el captcha<br/>y recibe sats al instante — sin registro.',
+    guide_btn:'¿Principiante? Empieza aquí',
+    every24h:'cada 24 horas',
+    field_label:'⚡ Lightning Address',
+    placeholder:'tu@wallet.satoshi',
+    claim_btn:'RECIBIR SATS',
+    next_claim:'PRÓXIMO CLAIM',
+    stat_sats:'SATS / CLAIM',
+    stat_cooldown:'COOLDOWN',
+    stat_claims:'CLAIMS HOY',
+    how_title:'// CÓMO FUNCIONA',
+    how1:'<strong>Ingresa tu Lightning Address</strong> — cualquier wallet compatible (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how2:'<strong>Resuelve el captcha</strong> — prueba de humanidad via hCaptcha',
+    how3:'<strong>Recibe sats al instante</strong> — pago Lightning directo a tu wallet',
+    how4:'<strong>Espera 24 horas</strong> — el mismo address queda bloqueado 24h para evitar abusos',
+    what_ln:'¿QUÉ ES LN?',
+    donate_label:'⚡ Donaciones',
+    buy_label:'₿ Comprar Bitcoin',
+    register_label:'⛓ Registrar en Blockchain',
+    dl_label:'▶ Descargar videos sin Ads',
+    hdr_paid:'TOTAL PAGADO <span id="hdr-sats">…</span> SATS',
+    hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
+    err_address:'⚠ Ingresa tu Lightning Address',
+    err_format:'⚠ Formato inválido — usa algo@wallet.com',
+    err_captcha:'⚠ Completa el captcha primero',
+    err_network:'✗ Error de red — intenta de nuevo',
+    processing:'PROCESANDO...',
+    wait:'⛔ ESPERA 24H',
+    blocked:'⛔ bloqueado',
+    ok:'✓ ok',
+  }
+};
+
+let currentLang = localStorage.getItem('lang') || 'pt';
+
+function setLang(lang) {
+  currentLang = lang;
+  localStorage.setItem('lang', lang);
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.textContent === lang.toUpperCase()));
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.dataset.i18n;
+    if (LANGS[lang][key] !== undefined) el.innerHTML = LANGS[lang][key];
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.dataset.i18nPlaceholder;
+    if (LANGS[lang][key]) el.placeholder = LANGS[lang][key];
+  });
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+const API = '';
+let cooldownInterval = null;
+let cooldownEnd = null;
+
+let hcaptchaReady = false;
+let sitekeyReady = '';
+
+window.onHcaptchaLoad = function() {
+  hcaptchaReady = true;
+  if (sitekeyReady) renderCaptcha();
+}
+
+function renderCaptcha() {
+  hcaptcha.render('hcaptcha-widget', { sitekey: sitekeyReady, theme: 'dark' });
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch(`${API}/api/config`);
+    const d = await r.json();
+    sitekeyReady = d.hcaptcha_sitekey;
+    if (hcaptchaReady && sitekeyReady) renderCaptcha();
+    document.getElementById('faucet-amount').textContent = d.amount_sat;
+    document.getElementById('stat-amount').textContent   = d.amount_sat;
+  } catch(e) {}
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch(`${API}/api/stats`);
+    const d = await r.json();
+    document.getElementById('stat-total').textContent   = d.total_claims;
+    const hs = document.getElementById('hdr-sats');
+    const hc = document.getElementById('hdr-claims');
+    if (hs) hs.textContent = d.total_sats_paid.toLocaleString();
+    if (hc) hc.textContent = d.total_claims;
+  } catch(e) {}
+}
+
+document.getElementById('ln-address').addEventListener('blur', async function() {
+  const ln = this.value.trim();
+  const el = document.getElementById('addr-status');
+  if (!ln || !ln.includes('@')) { el.textContent = ''; return; }
+  el.style.color = 'var(--dim)'; el.textContent = '…';
+  try {
+    const r = await fetch(`${API}/api/check`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ln_address:ln})});
+    const d = await r.json();
+    if (d.blocked) {
+      el.style.color='var(--red)'; el.textContent=LANGS[currentLang].blocked;
+      showCooldown(d.wait_seconds);
+    } else {
+      el.style.color='var(--green)'; el.textContent=LANGS[currentLang].ok;
+      hideCooldown();
+    }
+  } catch(e) { el.textContent=''; }
+});
+
+async function doClaim() {
+  const L   = LANGS[currentLang];
+  const ln  = document.getElementById('ln-address').value.trim();
+  const btn = document.getElementById('btn-claim');
+  const msg = document.getElementById('status-msg');
+  msg.className = 'status-msg'; msg.textContent = '';
+  if (!ln) { showMsg('error', L.err_address); return; }
+  if (!ln.includes('@')) { showMsg('error', L.err_format); return; }
+  const captchaToken = hcaptcha.getResponse();
+  if (!captchaToken) { showMsg('error', L.err_captcha); return; }
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span>${L.processing}`;
+  try {
+    const r = await fetch(`${API}/api/claim`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ln_address:ln,captcha_token:captchaToken})});
+    const d = await r.json();
+    if (r.status === 200) {
+      showMsg('success', `⚡ ${d.message}\nHash: ${d.payment_hash?.substring(0,20)}…`);
+      showCooldown(86400);
+      btn.disabled = true;
+      btn.innerHTML = L.wait;
+      await loadStatus();
+    } else {
+      showMsg('error', `✗ ${d.detail || 'Error'}`);
+      btn.disabled = false;
+      btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
+    }
+  } catch(e) {
+    showMsg('error', L.err_network);
+    btn.disabled = false;
+    btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
+  }
+  hcaptcha.reset();
+}
+
+function showMsg(type, text) {
+  const el = document.getElementById('status-msg');
+  el.className = `status-msg ${type}`;
+  el.textContent = text;
+}
+
+function showCooldown(seconds) {
+  const bar=document.getElementById('cooldown-bar'),fill=document.getElementById('cooldown-fill'),timer=document.getElementById('cooldown-timer');
+  bar.classList.add('visible');
+  if (cooldownInterval) clearInterval(cooldownInterval);
+  cooldownEnd = Date.now() + seconds * 1000;
+  function tick() {
+    const rem = Math.max(0,(cooldownEnd-Date.now())/1000);
+    if (rem<=0){clearInterval(cooldownInterval);bar.classList.remove('visible');const btn=document.getElementById('btn-claim');btn.disabled=false;btn.innerHTML=`<span class="btn-shimmer"></span>${LANGS[currentLang].claim_btn}`;return;}
+    const h=Math.floor(rem/3600),m=Math.floor((rem%3600)/60),s=Math.floor(rem%60);
+    timer.textContent=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    fill.style.width=`${100-(rem/86400)*100}%`;
+  }
+  tick(); cooldownInterval=setInterval(tick,1000);
+}
+
+function hideCooldown(){document.getElementById('cooldown-bar').classList.remove('visible');if(cooldownInterval){clearInterval(cooldownInterval);cooldownInterval=null;}}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+setLang(currentLang);
+loadConfig();
+loadStatus();
+</script>
+</body>
+</html>
