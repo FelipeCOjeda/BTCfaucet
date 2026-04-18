@@ -186,7 +186,7 @@
 
   <div class="how">
     <div class="how-title" data-i18n="how_title">// COMO FUNCIONA</div>
-    <div class="step"><div class="step-num">1</div><div class="step-text" data-i18n="how1"><strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Phoenix, Breez, Alby...)</div></div>
+    <div class="step"><div class="step-num">1</div><div class="step-text" data-i18n="how1"><strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Blink, Alby...)</div></div>
     <div class="step"><div class="step-num">2</div><div class="step-text" data-i18n="how2"><strong>Resolva o captcha</strong> — prova de humanidade via hCaptcha</div></div>
     <div class="step"><div class="step-num">3</div><div class="step-text" data-i18n="how3"><strong>Receba os sats instantaneamente</strong> — pagamento Lightning direto para sua wallet</div></div>
     <div class="step"><div class="step-num">4</div><div class="step-text" data-i18n="how4"><strong>Aguarde 24 horas</strong> — o mesmo address fica bloqueado por 24h para evitar abusos</div></div>
@@ -243,7 +243,7 @@ const LANGS = {
     stat_cooldown:'COOLDOWN',
     stat_claims:'CLAIMS HOJE',
     how_title:'// COMO FUNCIONA',
-    how1:'<strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how1:'<strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Blink, Alby...)',
     how2:'<strong>Resolva o captcha</strong> — prova de humanidade via hCaptcha',
     how3:'<strong>Receba os sats instantaneamente</strong> — pagamento Lightning direto para sua wallet',
     how4:'<strong>Aguarde 24 horas</strong> — o mesmo address fica bloqueado por 24h para evitar abusos',
@@ -258,6 +258,11 @@ const LANGS = {
     err_format:'⚠ Formato inválido — use algo@wallet.com',
     err_captcha:'⚠ Complete o captcha primeiro',
     err_network:'✗ Erro de rede — tente novamente',
+    sent_ok:'sats enviados com sucesso!',
+    donate_label2:'Considere uma doação para o projeto',
+    yt_label:'Siga meu canal no YouTube',
+    tg_label:'Entre no grupo do Telegram',
+    abuse_warning:'VPN, Tor e IPs repetitivos são bloqueados automaticamente para evitar abusos.',
     processing:'PROCESSANDO...',
     wait:'⛔ AGUARDE 24H',
     blocked:'⛔ bloqueado',
@@ -277,7 +282,7 @@ const LANGS = {
     stat_cooldown:'COOLDOWN',
     stat_claims:'CLAIMS TODAY',
     how_title:'// HOW IT WORKS',
-    how1:'<strong>Enter your Lightning Address</strong> — any compatible wallet (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how1:'<strong>Enter your Lightning Address</strong> — any compatible wallet (Wallet of Satoshi, Blink, Alby...)',
     how2:'<strong>Solve the captcha</strong> — proof of humanity via hCaptcha',
     how3:'<strong>Receive sats instantly</strong> — Lightning payment directly to your wallet',
     how4:'<strong>Wait 24 hours</strong> — the same address is blocked for 24h to prevent abuse',
@@ -292,6 +297,11 @@ const LANGS = {
     err_format:'⚠ Invalid format — use something@wallet.com',
     err_captcha:'⚠ Please complete the captcha first',
     err_network:'✗ Network error — please try again',
+    sent_ok:'sats sent successfully!',
+    donate_label2:'Consider a donation to the project',
+    yt_label:'Subscribe to my YouTube channel',
+    tg_label:'Join the Telegram group',
+    abuse_warning:'VPN, Tor, and repeated IPs are automatically blocked to prevent abuse.',
     processing:'PROCESSING...',
     wait:'⛔ WAIT 24H',
     blocked:'⛔ blocked',
@@ -311,7 +321,7 @@ const LANGS = {
     stat_cooldown:'COOLDOWN',
     stat_claims:'CLAIMS HOY',
     how_title:'// CÓMO FUNCIONA',
-    how1:'<strong>Ingresa tu Lightning Address</strong> — cualquier wallet compatible (Wallet of Satoshi, Phoenix, Breez, Alby...)',
+    how1:'<strong>Ingresa tu Lightning Address</strong> — cualquier wallet compatible (Wallet of Satoshi, Blink, Alby...)',
     how2:'<strong>Resuelve el captcha</strong> — prueba de humanidad via hCaptcha',
     how3:'<strong>Recibe sats al instante</strong> — pago Lightning directo a tu wallet',
     how4:'<strong>Espera 24 horas</strong> — el mismo address queda bloqueado 24h para evitar abusos',
@@ -326,6 +336,11 @@ const LANGS = {
     err_format:'⚠ Formato inválido — usa algo@wallet.com',
     err_captcha:'⚠ Completa el captcha primero',
     err_network:'✗ Error de red — intenta de nuevo',
+    sent_ok:'sats enviados con éxito!',
+    donate_label2:'Considera una donación al proyecto',
+    yt_label:'Sígueme en YouTube',
+    tg_label:'Únete al grupo de Telegram',
+    abuse_warning:'VPN, Tor e IPs repetidos son bloqueados automáticamente para evitar abusos.',
     processing:'PROCESANDO...',
     wait:'⛔ ESPERA 24H',
     blocked:'⛔ bloqueado',
@@ -423,7 +438,7 @@ async function doClaim() {
     const r = await fetch(`${API}/api/claim`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ln_address:ln,captcha_token:captchaToken})});
     const d = await r.json();
     if (r.status === 200) {
-      showMsg('success', `⚡ ${d.message}\nHash: ${d.payment_hash?.substring(0,20)}…`);
+      showSuccessMsg(d.message, d.payment_hash || '', currentLang);
       showCooldown(86400);
       btn.disabled = true;
       btn.innerHTML = L.wait;
@@ -445,6 +460,45 @@ function showMsg(type, text) {
   const el = document.getElementById('status-msg');
   el.className = `status-msg ${type}`;
   el.textContent = text;
+}
+
+function showSuccessMsg(sats, hash, lang) {
+  const L = LANGS[lang];
+  const el = document.getElementById('status-msg');
+  el.className = 'status-msg success';
+  el.innerHTML = `
+    <div style="margin-bottom:10px;font-size:.9rem;font-family:var(--display);letter-spacing:.06em;">⚡ ${sats} ${L.sent_ok}</div>
+    <div style="font-size:.7rem;opacity:.6;margin-bottom:16px;font-family:var(--mono);">Hash: ${hash.substring(0,24)}…</div>
+    <div style="border-top:1px solid rgba(0,230,118,.15);padding-top:14px;display:flex;flex-direction:column;gap:8px;">
+      <a href="lightning:donate@lnvoltz.com"
+         style="display:flex;align-items:center;gap:10px;background:rgba(247,147,26,.08);border:1px solid rgba(247,147,26,.25);padding:10px 14px;text-decoration:none;transition:background .2s;">
+        <span style="font-size:1.1rem;">⚡</span>
+        <div>
+          <div style="font-family:var(--mono);font-size:.68rem;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;">${L.donate_label2}</div>
+          <div style="font-size:.78rem;color:var(--orange);">donate@lnvoltz.com</div>
+        </div>
+      </a>
+      <a href="https://www.youtube.com/c/bitcoineliberdade?sub_confirmation=1" target="_blank"
+         style="display:flex;align-items:center;gap:10px;background:rgba(255,0,0,.06);border:1px solid rgba(255,0,0,.2);padding:10px 14px;text-decoration:none;">
+        <span style="font-size:1.1rem;">▶</span>
+        <div>
+          <div style="font-family:var(--mono);font-size:.68rem;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;">${L.yt_label}</div>
+          <div style="font-size:.78rem;color:#ff4444;">Bitcoin e Liberdade</div>
+        </div>
+      </a>
+      <a href="https://t.me/+0sOmb3s9kR4wMzUx" target="_blank"
+         style="display:flex;align-items:center;gap:10px;background:rgba(41,182,246,.06);border:1px solid rgba(41,182,246,.2);padding:10px 14px;text-decoration:none;">
+        <span style="font-size:1.1rem;">✈</span>
+        <div>
+          <div style="font-family:var(--mono);font-size:.68rem;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;">${L.tg_label}</div>
+          <div style="font-size:.78rem;color:#29b6f6;">Bitcoin e Liberdade</div>
+        </div>
+      </a>
+    </div>
+    <div style="font-size:.68rem;color:var(--dim);border-top:1px solid var(--border);padding-top:10px;margin-top:8px;">
+      ⚠ ${L.abuse_warning}
+    </div>
+  `;
 }
 
 function showCooldown(seconds) {

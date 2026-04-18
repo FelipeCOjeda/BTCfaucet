@@ -272,7 +272,7 @@ async def claim(req: ClaimRequest, request: Request):
             conn.commit()
         return {
             "success": True,
-            "message": f"⚡ {FAUCET_AMOUNT_SAT} sats enviados!",
+            "message": f"⚡ {FAUCET_AMOUNT_SAT}!",
             "payment_hash": payment_hash,
         }
     except HTTPException:
