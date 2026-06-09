@@ -1234,7 +1234,7 @@ async def claim(req: ClaimRequest, request: Request):
         
         # FP age check - bloqueia fingerprints muito novos (< FP_MIN_AGE_MINUTES)
         # CRÍTICO: Verificar ANTES do INSERT para evitar poluir DB com farms
-        if is_fp_too_new(fp, ip, ln):
+        if ln not in config.WHITELIST and is_fp_too_new(fp, ip, ln):
             logger.warning(f"FP muito novo bloqueado em /api/claim: fp={fp[:12] if fp else 'None'}… ip={ip} ln={ln}")
             raise HTTPException(403, "Seu navegador está limpando os cookies. Por segurança, o sistema bloqueou o acesso. Tente novamente por outro navegador ou desative a limpeza automática de cookies e tente novamente após 10 minutos.")
 
