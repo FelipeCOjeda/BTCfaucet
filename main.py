@@ -949,13 +949,10 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
             if not (min_sat <= amount_sat <= max_sat):
                 raise HTTPException(400, f"Valor {amount_sat} sats fora do range [{min_sat}–{max_sat}]")
             callback = meta.get("callback", "")
-            # Validar que callback pertence ao mesmo domínio (previne SSRF)
-            try:
-                cb_host = urlparse(callback).hostname or ""
-            except Exception:
-                cb_host = ""
-            if cb_host != domain:
-                raise HTTPException(400, "LN Address inválido: callback em domínio diferente")
+            # Exigir HTTPS no callback — previne SSRF para IPs internos/metadata
+            # (domínio pode diferir do LN Address, ex: WoS usa livingroomofsatoshi.com)
+            if not callback.startswith("https://"):
+                raise HTTPException(400, "LN Address inválido: callback deve usar HTTPS")
             metadata = str(meta.get("metadata", ""))
             wallet_hash = compute_wallet_hash(callback, metadata)
             r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10)
