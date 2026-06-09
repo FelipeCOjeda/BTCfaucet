@@ -226,6 +226,7 @@
                 <input type="text" id="ln-address" data-i18n-placeholder="placeholder" placeholder="voce@wallet.satoshi" autocomplete="off" spellcheck="false"/>
         <span class="input-status" id="addr-status"></span>
       </div>
+      <div id="step1-error" style="display:none;color:var(--red);font-family:var(--mono);font-size:.75rem;margin:6px 0 8px;line-height:1.4;"></div>
       <button class="btn-next" id="btn-step1" onclick="goStep2()" disabled>
         CONTINUAR →
       </button>
@@ -394,6 +395,7 @@ const LANGS = {
     wait:'⛔ AGUARDE 24H',
     blocked:'⛔ bloqueado',
     ok:'✓ ok',
+    checking:'Verificando...',
   },
   en: {
     badge:'⚡ Lightning Network Faucet',
@@ -446,6 +448,7 @@ const LANGS = {
     wait:'⛔ WAIT 24H',
     blocked:'⛔ blocked',
     ok:'✓ ok',
+    checking:'Checking...',
   },
   es: {
     badge:'⚡ Lightning Network Faucet',
@@ -498,6 +501,7 @@ const LANGS = {
     wait:'⛔ ESPERA 24H',
     blocked:'⛔ bloqueado',
     ok:'✓ ok',
+    checking:'Verificando...',
   }
 };
 
@@ -870,11 +874,64 @@ function goStep4() {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 async function goStep2() {
-  const ln = document.getElementById('ln-address').value.trim();
+  const L      = LANGS[currentLang];
+  const inp    = document.getElementById('ln-address');
+  const btn    = document.getElementById('btn-step1');
+  const errEl  = document.getElementById('step1-error');
+  const ln     = inp.value.trim();
+
+  function showStep1Err(msg) {
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'CONTINUAR →';
+  }
+  function clearStep1Err() {
+    errEl.textContent = '';
+    errEl.style.display = 'none';
+  }
+
   if (!ln) return;
+
+  // Validação de formato: deve ser usuario@dominio.tld
+  const LN_RE = /^[^\s@]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+  if (!LN_RE.test(ln)) {
+    showStep1Err(L.err_format);
+    return;
+  }
+
+  clearStep1Err();
+  btn.disabled = true;
+  btn.textContent = L.checking;
+
+  try {
+    const fpHash = await getBrowserFingerprint();
+    const r = await fetch(`${API}/api/check`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ln_address: ln, fp_hash: fpHash})
+    });
+    if (!r.ok) {
+      showStep1Err(L.err_network);
+      return;
+    }
+    const d = await r.json();
+    if (d.blocked) {
+      showStep1Err(d.message || L.blocked);
+      if (d.wait_seconds) showCooldown(d.wait_seconds);
+      return;
+    }
+  } catch(e) {
+    showStep1Err(L.err_network);
+    return;
+  }
+
+  clearStep1Err();
+  btn.disabled = false;
+  btn.textContent = 'CONTINUAR →';
+
   await checkSuspectDomain(ln);
   _challengeRound = 1;
-  // Transition step 1 → 2
   document.getElementById('step-1').classList.remove('active');
   document.getElementById('step-2').classList.add('active');
   document.getElementById('dot-1').classList.replace('active','done');
@@ -932,12 +989,17 @@ function goStep3() {
 
 // Habilita botão step1 ao digitar endereço válido
 document.addEventListener('DOMContentLoaded', () => {
-  const inp = document.getElementById('ln-address');
-  const btn = document.getElementById('btn-step1');
+  const inp    = document.getElementById('ln-address');
+  const btn    = document.getElementById('btn-step1');
+  const errEl  = document.getElementById('step1-error');
+  const LN_RE  = /^[^\s@]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
   if (inp && btn) {
     inp.addEventListener('input', () => {
       const v = inp.value.trim();
-      btn.disabled = !(v.includes('@') && v.length > 3);
+      const valid = LN_RE.test(v);
+      btn.disabled = !valid;
+      // Limpa erro ao digitar para não confundir o usuário
+      if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
     });
   }
 });
