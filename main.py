@@ -1364,14 +1364,43 @@ async def claim(req: ClaimRequest, request: Request):
                 wh_blocked, wh_original = check_wallet_fingerprint(wallet_hash, ln)
                 if wh_blocked:
                     logger.warning(
-                        f"Wallet duplicada bloqueada: {ln} → wallet_hash já usado por {wh_original}"
+                        f"Wallet duplicada bloqueada: {ln} → wallet_hash já usado por {wh_original} | ip={ip}"
                     )
+                    asyncio.create_task(send_alert(
+                        f"🚨 <b>Fraude detectada — wallet duplicada</b>\n"
+                        f"<b>Bloqueado:</b> <code>{ln}</code>\n"
+                        f"<b>Já usado por:</b> <code>{wh_original}</code>\n"
+                        f"<b>IP:</b> <code>{ip}</code>"
+                    ))
                     with get_db() as conn:
                         conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
                         conn.commit()
                     raise HTTPException(403, "Esta carteira já foi utilizada com outro endereço Lightning. Acesso negado.")
-            # Registrar associação wallet_hash → ln_address
-            register_wallet_fingerprint(wallet_hash, ln)
+
+                # Verificar se mesmo IP já fez claim hoje com LN address diferente
+                with get_db() as conn:
+                    ip_other = conn.execute("""
+                        SELECT ln_address FROM claims
+                        WHERE ip_address = ? AND ln_address != ? AND status = 'paid'
+                          AND claimed_at >= datetime('now', 'start of day')
+                        LIMIT 1
+                    """, (ip, ln.lower())).fetchone()
+                if ip_other:
+                    other_ln = ip_other["ln_address"]
+                    logger.warning(
+                        f"IP multi-address bloqueado: {ln} | ip={ip} já usou {other_ln} hoje"
+                    )
+                    asyncio.create_task(send_alert(
+                        f"⚠️ <b>IP com múltiplos endereços detectado</b>\n"
+                        f"<b>Bloqueado:</b> <code>{ln}</code>\n"
+                        f"<b>Mesmo IP já usou:</b> <code>{other_ln}</code>\n"
+                        f"<b>IP:</b> <code>{ip}</code>"
+                    ))
+                    with get_db() as conn:
+                        conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                        conn.commit()
+                    raise HTTPException(403, "Este IP já foi utilizado para receber sats hoje.")
+
         except HTTPException:
             with get_db() as conn:
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
@@ -1417,6 +1446,9 @@ async def claim(req: ClaimRequest, request: Request):
                     f"CRITICAL: sats enviados mas status não persistido! "
                     f"claim_id={claim_id} ln={ln} hash={payment_hash}"
                 )
+
+            # Registrar wallet_hash só após pagamento confirmado
+            register_wallet_fingerprint(wallet_hash, ln)
 
             if dest_pubkey:
                 pk_blocked, pk_original = check_node_fingerprint(dest_pubkey, ln)
