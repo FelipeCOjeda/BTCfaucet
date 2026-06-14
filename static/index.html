@@ -1080,8 +1080,10 @@ async function doClaim() {
     } else {
       const detail = (d.detail || '').toLowerCase();
       let errMsg;
-      if (r.status === 503 || detail.includes('saldo') || detail.includes('sem saldo') || detail.includes('funds') || detail.includes('out of funds')) {
+      if (detail.includes('saldo') || detail.includes('sem saldo') || detail.includes('funds') || detail.includes('out of funds')) {
         errMsg = L.err_no_balance;
+      } else if (r.status === 503) {
+        errMsg = L.err_service;
       } else if (r.status === 429 || detail.includes('aguarde') || detail.includes('cooldown') || detail.includes('wait') || detail.includes('faltam')) {
         errMsg = d.detail || L.err_cooldown;
       } else if (r.status === 403) {

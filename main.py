@@ -938,7 +938,7 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
         client = http_client or httpx.AsyncClient(timeout=10)
         _owns_client = http_client is None
         try:
-            r1 = await client.get(url, timeout=10)
+            r1 = await client.get(url, timeout=10, follow_redirects=True)
             if r1.status_code != 200:
                 raise HTTPException(400, "LN Address não encontrado ou indisponível")
             meta = r1.json()
@@ -955,7 +955,7 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
                 raise HTTPException(400, "LN Address inválido: callback deve usar HTTPS")
             metadata = str(meta.get("metadata", ""))
             wallet_hash = compute_wallet_hash(callback, metadata)
-            r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10)
+            r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10, follow_redirects=True)
             data2 = r2.json()
             if data2.get("status") == "ERROR":
                 raise HTTPException(400, data2.get("reason", "Erro ao gerar invoice"))
@@ -982,7 +982,16 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
                 timeout=30,
             )
             if r.status_code not in (200, 201):
-                logger.error(f"LNbits error {r.status_code}: {r.text[:500]}")
+                body_text = r.text[:500]
+                logger.error(f"LNbits error {r.status_code}: {body_text}")
+                try:
+                    detail = str(r.json().get("detail", "")).lower()
+                except Exception:
+                    detail = ""
+                if "rejected" in detail or "recipient" in detail:
+                    raise HTTPException(400, "Sua wallet recusou o pagamento de 1 sat. Algumas wallets têm valor mínimo maior. Tente outra wallet Lightning.")
+                if "routing" in detail or "fees" in detail or r.status_code == 520:
+                    raise HTTPException(503, "Rede Lightning congestionada. Tente novamente em alguns minutos.")
                 raise HTTPException(500, "Erro ao processar pagamento. Tente novamente.")
             return r.json()
         finally:
@@ -1201,12 +1210,13 @@ async def claim(req: ClaimRequest, request: Request):
             logger.warning(f"Challenge inválido: '{raw_phrase[:30]}' ip={ip} ln={ln}")
             raise HTTPException(403, "Desafio de verificação inválido. Recarregue a página e tente novamente.")
 
-    # 2c – Verificar Proof of Work
-    pow_seed  = (req.pow_seed or "").strip()
-    pow_nonce = req.pow_nonce
-    if not pow_seed or pow_nonce is None or not verify_pow(pow_seed, pow_nonce):
-        logger.warning(f"PoW inválido: seed={pow_seed[:20]} nonce={pow_nonce} ip={ip} ln={ln}")
-        raise HTTPException(403, "Verificação de segurança falhou. Recarregue a página e tente novamente.")
+    # 2c – Verificar Proof of Work (bypass para WHITELIST e WHITELIST_ADM)
+    if not _is_whitelisted:
+        pow_seed  = (req.pow_seed or "").strip()
+        pow_nonce = req.pow_nonce
+        if not pow_seed or pow_nonce is None or not verify_pow(pow_seed, pow_nonce):
+            logger.warning(f"PoW inválido: seed={pow_seed[:20]} nonce={pow_nonce} ip={ip} ln={ln}")
+            raise HTTPException(403, "Verificação de segurança falhou. Recarregue a página e tente novamente.")
 
     # 3 – Rate limits (pós-captcha)
     # WHITELIST_ADM: ignora tudo | WHITELIST: respeita cooldowns | normal: respeita tudo
@@ -1231,7 +1241,7 @@ async def claim(req: ClaimRequest, request: Request):
         
         # FP age check - bloqueia fingerprints muito novos (< FP_MIN_AGE_MINUTES)
         # CRÍTICO: Verificar ANTES do INSERT para evitar poluir DB com farms
-        if ln not in config.WHITELIST and is_fp_too_new(fp, ip, ln):
+        if ln not in config.WHITELIST and ln not in config.WHITELIST_ADM and is_fp_too_new(fp, ip, ln):
             logger.warning(f"FP muito novo bloqueado em /api/claim: fp={fp[:12] if fp else 'None'}… ip={ip} ln={ln}")
             raise HTTPException(403, "Seu navegador está limpando os cookies. Por segurança, o sistema bloqueou o acesso. Tente novamente por outro navegador ou desative a limpeza automática de cookies e tente novamente após 10 minutos.")
 
@@ -1295,7 +1305,7 @@ async def claim(req: ClaimRequest, request: Request):
         # Educa o usuário sem bloquear, penaliza bots com FPs descartáveis
         # WHITELIST_ADM está isento — nunca sofre penalty
         fp_penalty = False
-        if fp and FP_MIN_AGE_MINUTES > 0 and ln not in config.WHITELIST_ADM:
+        if fp and FP_MIN_AGE_MINUTES > 0 and ln not in config.WHITELIST_ADM and ln not in config.WHITELIST:
             with get_db() as conn:
                 fp_first = conn.execute(
                     "SELECT MIN(claimed_at) FROM claims WHERE fp_hash=?", (fp,)
