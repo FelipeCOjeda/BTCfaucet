@@ -391,6 +391,7 @@ const LANGS = {
     yt_label:'Siga meu canal no YouTube',
     tg_label:'Entre no grupo do Telegram',
     abuse_warning:'VPN, Tor e IPs repetitivos são bloqueados automaticamente para evitar abusos.',
+    warn_wos_payment:'⚠ Wallet of Satoshi está com problemas no node de recebimento. Tente com Blink (blink.sv), cake.cash ou Zeus.',
     processing:'PROCESSANDO...',
     wait:'⛔ AGUARDE 24H',
     blocked:'⛔ bloqueado',
@@ -444,6 +445,7 @@ const LANGS = {
     yt_label:'Subscribe to my YouTube channel',
     tg_label:'Join the Telegram group',
     abuse_warning:'VPN, Tor, and repeated IPs are automatically blocked to prevent abuse.',
+    warn_wos_payment:'⚠ Wallet of Satoshi is having issues with their receiving node. Try Blink (blink.sv), cake.cash or Zeus.',
     processing:'PROCESSING...',
     wait:'⛔ WAIT 24H',
     blocked:'⛔ blocked',
@@ -497,6 +499,7 @@ const LANGS = {
     yt_label:'Sígueme en YouTube',
     tg_label:'Únete al grupo de Telegram',
     abuse_warning:'VPN, Tor e IPs repetidos son bloqueados automáticamente para evitar abusos.',
+    warn_wos_payment:'⚠ Wallet of Satoshi tiene problemas en su nodo receptor. Prueba con Blink (blink.sv), cake.cash o Zeus.',
     processing:'PROCESANDO...',
     wait:'⛔ ESPERA 24H',
     blocked:'⛔ bloqueado',
@@ -1083,6 +1086,12 @@ async function doClaim() {
       if (detail.includes('saldo') || detail.includes('sem saldo') || detail.includes('funds') || detail.includes('out of funds')) {
         errMsg = L.err_no_balance;
       } else if (r.status === 503) {
+        if (d.detail === 'wos_routing_error') {
+          showMsg('warning', L.warn_wos_payment);
+          btn.disabled = false;
+          btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
+          return;
+        }
         errMsg = L.err_service;
       } else if (r.status === 429 || detail.includes('aguarde') || detail.includes('cooldown') || detail.includes('wait') || detail.includes('faltam')) {
         errMsg = d.detail || L.err_cooldown;

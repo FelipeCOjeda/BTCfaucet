@@ -1490,10 +1490,15 @@ async def claim(req: ClaimRequest, request: Request):
             else:
                 success_msg = f"⚡ {reward_amount} sats!"
             return {"success": True, "message": success_msg, "payment_hash": payment_hash, "amount_sat": reward_amount, "fp_penalty": fp_penalty, "farm_decay": farm_decay}
-        except HTTPException:
+        except HTTPException as e:
             with get_db() as conn:
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
                 conn.commit()
+            # Mensagem específica quando WoS/LRoS falha por routing hint corrompido
+            if e.status_code == 503:
+                domain = ln.split("@")[1] if "@" in ln else ""
+                if domain in {"walletofsatoshi.com", "livingroomofsatoshi.com"}:
+                    raise HTTPException(503, "wos_routing_error")
             raise
         except BaseException as e:
             # Captura CancelledError, TimeoutError, etc. — garante que a linha não
