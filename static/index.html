@@ -105,6 +105,14 @@
   .proof-check:hover{border-color:var(--orange)}
   @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
   .status-msg.warning{border-color:rgba(255,140,0,.4)}
+  #wos-fallback{display:none;margin-top:14px;padding:14px 16px;border-left:3px solid var(--orange);background:rgba(247,147,26,.06);animation:fadeIn .3s ease}
+  #wos-fallback p{font-family:var(--mono);font-size:.82rem;color:var(--orange);margin:0 0 10px}
+  #wos-fallback .fallback-row{display:flex;gap:8px;align-items:center}
+  #wos-fallback input{flex:1;padding:9px 12px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:.8rem;outline:none}
+  #wos-fallback input:focus{border-color:var(--orange)}
+  #wos-fallback button{padding:9px 16px;background:var(--orange);color:var(--black);border:none;font-family:var(--display);font-size:.85rem;letter-spacing:.08em;cursor:pointer;white-space:nowrap}
+  #wos-fallback button:disabled{background:var(--muted);cursor:not-allowed}
+  #wos-fallback .fallback-hint{font-family:var(--mono);font-size:.7rem;color:var(--dim);margin:6px 0 0}
   .status-msg.success{display:block;border-color:var(--green);background:rgba(0,230,118,.06);color:var(--green)}
   .status-msg.error{display:block;border-color:var(--red);background:rgba(255,61,61,.06);color:var(--red)}
   .status-msg.info{display:block;border-color:var(--orange);background:rgba(247,147,26,.06);color:var(--orange)}
@@ -274,6 +282,16 @@
     </div>
 
     <div class="status-msg" id="status-msg"></div>
+
+    <div id="wos-fallback">
+      <p id="wos-fallback-msg"></p>
+      <div class="fallback-row">
+        <input type="text" id="wos-alt-address" placeholder="voce@blink.sv" autocomplete="off" spellcheck="false"/>
+        <button onclick="doFallbackClaim()" id="btn-fallback">RECEBER</button>
+      </div>
+      <p class="fallback-hint" id="wos-fallback-hint"></p>
+    </div>
+
     <div class="cooldown-bar" id="cooldown-bar">
       <div class="cooldown-label">
         <span data-i18n="next_claim">PRÓXIMO CLAIM</span>
@@ -392,6 +410,9 @@ const LANGS = {
     tg_label:'Entre no grupo do Telegram',
     abuse_warning:'VPN, Tor e IPs repetitivos são bloqueados automaticamente para evitar abusos.',
     warn_wos_payment:'⚠ Wallet of Satoshi está com problemas no node de recebimento. Tente com Blink (blink.sv), cake.cash ou Zeus.',
+    wos_fallback_msg:'⚠ Wallet of Satoshi com problemas de roteamento. Informe outra wallet para receber agora:',
+    wos_fallback_hint:'Sugestões: blink.sv · cake.cash · coinos.io · zeuspay.com',
+    wos_fallback_sending:'Enviando...',
     processing:'PROCESSANDO...',
     wait:'⛔ AGUARDE 24H',
     blocked:'⛔ bloqueado',
@@ -446,6 +467,9 @@ const LANGS = {
     tg_label:'Join the Telegram group',
     abuse_warning:'VPN, Tor, and repeated IPs are automatically blocked to prevent abuse.',
     warn_wos_payment:'⚠ Wallet of Satoshi is having issues with their receiving node. Try Blink (blink.sv), cake.cash or Zeus.',
+    wos_fallback_msg:'⚠ Wallet of Satoshi routing issue. Enter another wallet to receive now:',
+    wos_fallback_hint:'Suggestions: blink.sv · cake.cash · coinos.io · zeuspay.com',
+    wos_fallback_sending:'Sending...',
     processing:'PROCESSING...',
     wait:'⛔ WAIT 24H',
     blocked:'⛔ blocked',
@@ -500,6 +524,9 @@ const LANGS = {
     tg_label:'Únete al grupo de Telegram',
     abuse_warning:'VPN, Tor e IPs repetidos son bloqueados automáticamente para evitar abusos.',
     warn_wos_payment:'⚠ Wallet of Satoshi tiene problemas en su nodo receptor. Prueba con Blink (blink.sv), cake.cash o Zeus.',
+    wos_fallback_msg:'⚠ Wallet of Satoshi con problemas de ruta. Ingresa otra wallet para recibir ahora:',
+    wos_fallback_hint:'Sugerencias: blink.sv · cake.cash · coinos.io · zeuspay.com',
+    wos_fallback_sending:'Enviando...',
     processing:'PROCESANDO...',
     wait:'⛔ ESPERA 24H',
     blocked:'⛔ bloqueado',
@@ -533,6 +560,7 @@ let cooldownEnd = null;
 let _isSuspectDomain = false;
 let _challengeRound  = 1;
 let _currentPhrase2  = '';
+let _wosClaimId      = null;
 
 async function checkSuspectDomain(ln) {
   try {
@@ -618,6 +646,9 @@ function resetSteps() {
   const b2 = document.getElementById('btn-step2');
   if (b2) b2.disabled = true;
   if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
+  const fb = document.getElementById('wos-fallback');
+  if (fb) fb.style.display = 'none';
+  _wosClaimId = null;
 }
 
 
@@ -1087,7 +1118,15 @@ async function doClaim() {
         errMsg = L.err_no_balance;
       } else if (r.status === 503) {
         if (d.detail === 'wos_routing_error') {
-          showMsg('warning', L.warn_wos_payment);
+          _wosClaimId = d.claim_id || null;
+          const fb = document.getElementById('wos-fallback');
+          document.getElementById('wos-fallback-msg').textContent = L.wos_fallback_msg;
+          document.getElementById('wos-fallback-hint').textContent = L.wos_fallback_hint;
+          document.getElementById('wos-alt-address').value = '';
+          document.getElementById('btn-fallback').disabled = false;
+          document.getElementById('btn-fallback').textContent = 'RECEBER';
+          fb.style.display = 'block';
+          msg.className = 'status-msg'; msg.textContent = '';
           btn.disabled = false;
           btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
           return;
@@ -1264,6 +1303,51 @@ const WALLET_DOMAINS = [
 loadConfig();
 loadStatus();
 loadBalance();
+
+async function doFallbackClaim() {
+  const L      = LANGS[currentLang];
+  const altLn  = (document.getElementById('wos-alt-address').value || '').trim();
+  const btn    = document.getElementById('btn-fallback');
+  const hint   = document.getElementById('wos-fallback-hint');
+
+  if (!altLn || !altLn.includes('@')) {
+    hint.style.color = 'var(--red)';
+    hint.textContent = L.err_format || 'Formato inválido — use algo@wallet.com';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = L.wos_fallback_sending || 'Enviando...';
+  hint.style.color = 'var(--dim)';
+  hint.textContent = L.wos_fallback_hint;
+
+  try {
+    const r = await fetch(`${API}/api/claim/fallback`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({claim_id: _wosClaimId, alternative_ln_address: altLn})
+    });
+    const d = await r.json();
+
+    if (r.status === 200 && d.success) {
+      document.getElementById('wos-fallback').style.display = 'none';
+      resetSteps();
+      showSuccessMsg(d.amount_sat, d.payment_hash || '', currentLang, false);
+      showCooldown(86400);
+      await loadStatus();
+    } else {
+      hint.style.color = 'var(--red)';
+      hint.textContent = d.detail || 'Erro ao processar. Tente outra wallet.';
+      btn.disabled = false;
+      btn.textContent = 'RECEBER';
+    }
+  } catch(e) {
+    hint.style.color = 'var(--red)';
+    hint.textContent = L.err_network || 'Erro de rede.';
+    btn.disabled = false;
+    btn.textContent = 'RECEBER';
+  }
+}
 </script>
 
 <script>

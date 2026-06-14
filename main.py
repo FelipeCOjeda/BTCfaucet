@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
@@ -1495,10 +1496,14 @@ async def claim(req: ClaimRequest, request: Request):
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
                 conn.commit()
             # Mensagem específica quando WoS/LRoS falha por routing hint corrompido
+            # Inclui claim_id para o frontend oferecer fallback com wallet alternativa
             if e.status_code == 503:
                 domain = ln.split("@")[1] if "@" in ln else ""
                 if domain in {"walletofsatoshi.com", "livingroomofsatoshi.com"}:
-                    raise HTTPException(503, "wos_routing_error")
+                    return JSONResponse(
+                        status_code=503,
+                        content={"detail": "wos_routing_error", "claim_id": claim_id, "amount_sat": reward_amount}
+                    )
             raise
         except BaseException as e:
             # Captura CancelledError, TimeoutError, etc. — garante que a linha não
@@ -1515,6 +1520,98 @@ async def claim(req: ClaimRequest, request: Request):
     finally:
         # Sempre libera o lock, mesmo em exceção
         release_claim_lock(ln)
+
+
+WOS_DOMAINS = {"walletofsatoshi.com", "livingroomofsatoshi.com"}
+
+@app.post("/api/claim/fallback")
+async def claim_fallback(body: dict, request: Request):
+    """
+    Reencaminha um pagamento WoS falhado para uma wallet alternativa.
+    Requer claim_id de uma tentativa WoS falha nos últimos 15 minutos.
+    """
+    ip = get_client_ip(request)
+    if not await check_rate_limit(ip, max_req=5, window=300):
+        raise HTTPException(429, "Muitas tentativas. Aguarde alguns minutos.")
+
+    claim_id = body.get("claim_id")
+    alt_ln = (body.get("alternative_ln_address") or "").strip().lower()
+
+    if not claim_id or not alt_ln:
+        raise HTTPException(400, "Dados incompletos.")
+
+    # Validar endereço alternativo
+    if "@" not in alt_ln:
+        raise HTTPException(400, "Endereço inválido.")
+    alt_domain = alt_ln.split("@")[1]
+    if alt_domain in WOS_DOMAINS:
+        raise HTTPException(400, "Informe uma wallet diferente da Wallet of Satoshi.")
+    valid, err_msg = is_valid_ln_address(alt_ln)
+    if not valid:
+        raise HTTPException(400, err_msg or "LN Address inválido.")
+
+    # Verificar claim original
+    with get_db() as conn:
+        claim = conn.execute("""
+            SELECT id, ln_address, amount_sat, ip_address, claimed_at
+            FROM claims
+            WHERE id=? AND status='failed'
+              AND claimed_at >= datetime('now', '-15 minutes')
+        """, (claim_id,)).fetchone()
+
+    if not claim:
+        raise HTTPException(400, "Claim não encontrado ou expirado (máx 15 min).")
+
+    # Verificar que o claim original era WoS
+    orig_domain = claim["ln_address"].split("@")[1] if "@" in claim["ln_address"] else ""
+    if orig_domain not in WOS_DOMAINS:
+        raise HTTPException(400, "Fallback disponível apenas para Wallet of Satoshi.")
+
+    # Verificar IP (proteção anti-abuso: só o mesmo IP que fez o claim pode usar o fallback)
+    if claim["ip_address"] and claim["ip_address"] != ip:
+        raise HTTPException(403, "IP diferente do claim original.")
+
+    # Verificar se o endereço alternativo já recebeu hoje
+    if alt_ln not in config.WHITELIST_ADM:
+        alt_blocked, _ = is_address_blocked(alt_ln)
+        if alt_blocked:
+            raise HTTPException(400, "Este endereço alternativo já recebeu sats hoje.")
+
+    if is_dynamically_blocked(ip=ip, fp=None, ln=alt_ln):
+        raise HTTPException(403, "Endereço alternativo bloqueado.")
+
+    reward_amount = claim["amount_sat"]
+
+    # Resolver endereço alternativo e pagar
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            bolt11, wallet_hash = await resolve_ln_address(alt_ln, reward_amount * 1000, http_client=http)
+            result = await pay_invoice(bolt11)
+            payment_hash = result.get("payment_hash", "")
+            dest_pubkey = decode_bolt11_pubkey(bolt11)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"claim_fallback error: {e}")
+        raise HTTPException(500, "Erro ao processar pagamento alternativo.")
+
+    # Atualizar claim: marcar como pago com endereço alternativo
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE claims SET status='paid', ln_address=?, payment_hash=?, destination_pubkey=? WHERE id=?",
+            (alt_ln, payment_hash, dest_pubkey, claim_id)
+        )
+        conn.commit()
+
+    register_wallet_fingerprint(wallet_hash, alt_ln)
+    logger.info(f"Fallback OK: WoS→{alt_ln} | claim_id={claim_id} | hash={payment_hash[:16]}...")
+
+    return {
+        "success": True,
+        "message": f"⚡ {reward_amount} sats enviados para {alt_ln}!",
+        "payment_hash": payment_hash,
+        "amount_sat": reward_amount,
+    }
 
 
 # [FIX #7] Proxy LNURL com sanitização de username e cb_id
