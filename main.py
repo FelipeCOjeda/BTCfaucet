@@ -973,58 +973,72 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
 
 async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dict:
     """
-    Paga um invoice diretamente via Phoenix (síncrono — confirma antes de retornar).
-    Tenta até 3 vezes com backoff exponencial. Fee máxima: PHOENIX_MAX_FEE_SAT.
+    Paga um invoice via LNbits (LNvoltz LND).
+    Confirma o pagamento via polling antes de retornar — evita o bug de 'falso paid'.
     Retorna {"payment_hash": ..., "payment_preimage": ...} em caso de sucesso.
     """
-    last_reason = ""
+    headers = {"X-Api-Key": LNBITS_ADMIN_KEY, "Content-Type": "application/json"}
+
     for attempt in range(3):
         try:
-            # Sempre cria cliente próprio — auth Basic não deve vazar para outros requests
-            async with httpx.AsyncClient(timeout=60) as ph:
-                r = await ph.post(
-                    f"{PHOENIXD_URL}/payinvoice",
-                    data={
-                        "invoice": bolt11,
-                        "maxFeeFlat": PHOENIX_MAX_FEE_SAT,
-                        "maxFeePct": 50,
-                    },
-                    auth=("", PHOENIXD_PASSWORD),
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    f"{LNBITS_URL}/api/v1/payments",
+                    json={"out": True, "bolt11": bolt11},
+                    headers=headers,
                 )
-            data = r.json()
         except Exception as e:
-            logger.error(f"pay_invoice Phoenix conexão falhou (tentativa {attempt+1}/3): {e}")
-            last_reason = "connection_error"
+            logger.error(f"pay_invoice LNbits conexão falhou (tentativa {attempt+1}/3): {e}")
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             continue
 
-        preimage = data.get("paymentPreimage") or data.get("preimage")
-        if preimage:
-            logger.info(f"Phoenix pagamento confirmado na tentativa {attempt+1}/3")
-            return {
-                "payment_hash": data.get("paymentHash", ""),
-                "payment_preimage": preimage,
-            }
+        if r.status_code not in (200, 201):
+            body = r.text[:300]
+            logger.error(f"LNbits error {r.status_code}: {body}")
+            try:
+                detail = str(r.json().get("detail", "")).lower()
+            except Exception:
+                detail = ""
+            if "rejected" in detail or "recipient" in detail:
+                raise HTTPException(400, "Sua wallet recusou o pagamento. Algumas wallets têm valor mínimo maior. Tente outra wallet Lightning.")
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            continue
 
-        reason = data.get("reason", "").lower()
-        last_reason = reason
-        logger.warning(f"Phoenix payinvoice tentativa {attempt+1}/3 falhou: {reason}")
+        data = r.json()
+        payment_hash = data.get("payment_hash") or data.get("checking_id", "")
 
-        # Rejeição explícita pela wallet do destinatário — não adianta retry
-        if "rejected" in reason or "recipient" in reason:
-            raise HTTPException(
-                400,
-                "Sua wallet recusou o pagamento. Algumas wallets têm valor mínimo maior. Tente outra wallet Lightning.",
-            )
+        # Se já confirmado imediatamente (LNbits síncrono)
+        if data.get("status") == "success" and data.get("preimage"):
+            logger.info(f"LNbits pagamento confirmado imediatamente (tentativa {attempt+1})")
+            return {"payment_hash": payment_hash, "payment_preimage": data["preimage"]}
 
+        # Polling de confirmação — até 30s
+        if payment_hash:
+            for poll in range(10):
+                await asyncio.sleep(3)
+                try:
+                    async with httpx.AsyncClient(timeout=15) as pc:
+                        pr = await pc.get(
+                            f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
+                            headers=headers,
+                        )
+                    pd = pr.json()
+                    if pd.get("preimage") and pd.get("paid"):
+                        logger.info(f"LNbits pagamento confirmado no poll {poll+1} (tentativa {attempt+1})")
+                        return {"payment_hash": payment_hash, "payment_preimage": pd["preimage"]}
+                    if pd.get("status") == "failed":
+                        logger.warning(f"LNbits pagamento falhou no poll {poll+1}")
+                        break
+                except Exception as pe:
+                    logger.warning(f"Polling erro: {pe}")
+
+        logger.warning(f"pay_invoice tentativa {attempt+1}/3: sem confirmação após polling")
         if attempt < 2:
-            await asyncio.sleep(2 ** attempt)  # 1s → 2s
+            await asyncio.sleep(2 ** attempt)
 
-    # Esgotou retries
-    if "routing" in last_reason or "fees" in last_reason or "route" in last_reason or "temporary" in last_reason:
-        raise HTTPException(503, "Rede Lightning congestionada. Tente novamente em alguns minutos.")
-    raise HTTPException(503, "Não foi possível processar o pagamento. Tente novamente.")
+    raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/api/status")
