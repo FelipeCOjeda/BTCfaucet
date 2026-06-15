@@ -735,6 +735,10 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
     app.state.last_archive = 0.0  # timestamp do último archive de claims antigos
+    app.state.balance_alert_sent = 0.0  # timestamp do último alerta de saldo baixo
+
+    BALANCE_LOW_SAT = 2000      # limiar de alerta (sats)
+    BALANCE_ALERT_COOLDOWN = 10800  # só reenvia alerta a cada 3 horas
 
     async def _periodic():
         while True:
@@ -761,6 +765,26 @@ async def lifespan(app: FastAPI):
                     if n:
                         logger.info(f"Archive: {n} claim(s) antigos removidos")
                     app.state.last_archive = _time.time()
+                # Verificar saldo LNvoltz e alertar admin se baixo
+                try:
+                    async with httpx.AsyncClient(timeout=10) as hc:
+                        r = await hc.get(
+                            f"{LNBITS_URL}/api/v1/wallet",
+                            headers={"X-Api-Key": LNBITS_ADMIN_KEY},
+                        )
+                    if r.status_code == 200:
+                        balance_sat = r.json().get("balance", 0) // 1000
+                        since_last = _time.time() - app.state.balance_alert_sent
+                        if balance_sat < BALANCE_LOW_SAT and since_last > BALANCE_ALERT_COOLDOWN:
+                            await send_alert(
+                                f"⚠️ <b>Saldo LNvoltz baixo: {balance_sat} sats</b>\n\n"
+                                f"Limiar: {BALANCE_LOW_SAT} sats\n"
+                                f"Pagamentos podem falhar em breve. Faça top-up."
+                            )
+                            app.state.balance_alert_sent = _time.time()
+                            logger.warning(f"Alerta de saldo baixo enviado: {balance_sat} sats")
+                except Exception as e:
+                    logger.warning(f"Verificação de saldo falhou: {e}")
             except Exception as e:
                 logger.error(f"Cleanup error: {e}")
 
