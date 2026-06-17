@@ -87,7 +87,7 @@ def _block_entity(entity_type: str, value: str, reason: str = "manual") -> Tuple
         if entity_type == "ln" and "@" not in value:
             return False, f"❌ LN address inválido: {value}"
 
-        success = block_entity(entity_type, value, reason)
+        success = block_entity(entity_type, value)
 
         if success:
             return True, f"✅ Bloqueado: <code>{value}</code>\n⚡ Ativo imediatamente (sem restart)"
@@ -441,6 +441,60 @@ def _hour_stats() -> str:
         return f"❌ Erro: {e}"
 
 
+def _motivo24() -> str:
+    """Motivos dos bloqueios em blocked_entities nas últimas 24h, por tipo."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute("""
+            SELECT entity_type, entity_value, reason, blocked_at
+            FROM blocked_entities
+            WHERE datetime(blocked_at) >= datetime('now', '-24 hours')
+            ORDER BY entity_type, blocked_at DESC
+        """).fetchall()
+        conn.close()
+
+        if not rows:
+            return "✅ <b>Nenhum bloqueio nas últimas 24h</b>"
+
+        buckets = {"ln": [], "fp": [], "ja3": [], "ip": [], "other": []}
+        for r in rows:
+            t = r["entity_type"]
+            key = t if t in buckets else "other"
+            buckets[key].append(r)
+
+        labels = {
+            "ln": ("🔗", "LN Address"),
+            "fp": ("🖥️", "FP (Browser)"),
+            "ja3": ("🔐", "FP Agent (TLS/JA3)"),
+            "ip": ("🌐", "IP"),
+            "other": ("⚠️", "Outros"),
+        }
+
+        lines = [f"🚫 <b>Bloqueios últimas 24h — {len(rows)} entidade(s)</b>\n"]
+        for key, entries in buckets.items():
+            if not entries:
+                continue
+            icon, title = labels[key]
+            lines.append(f"{icon} <b>{title} ({len(entries)}):</b>")
+            for r in entries[:10]:
+                val = r["entity_value"]
+                val_trunc = val[:30] + "…" if len(val) > 30 else val
+                reason = r["reason"] or "—"
+                ts = (r["blocked_at"] or "")[:16]
+                lines.append(f"  • <code>{val_trunc}</code>\n    motivo: {reason} | {ts}")
+            if len(entries) > 10:
+                lines.append(f"  … e mais {len(entries) - 10}")
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
+    except Exception as e:
+        return f"❌ Erro: {e}"
+
+
 # ============================================================================
 # TOGGLE .ENV (PROGRESSIVE & FP_BLOCK_STRICT)
 # ============================================================================
@@ -584,6 +638,9 @@ async def handle_message(update: dict) -> Optional[str]:
     elif cmd == "/status":
         return _hour_stats()
 
+    elif cmd == "/motivo24":
+        return _motivo24()
+
     # ─── TOGGLE CONFIG ────────────────────────────────────────────────────
     elif cmd == "/progressive":
         from config import PROGRESSIVE_REWARDS
@@ -620,7 +677,8 @@ async def handle_message(update: dict) -> Optional[str]:
             "<b>📊 Monitoramento:</b>\n"
             "/abuse - Abusos nas últimas 6h\n"
             "/recent - Últimos 10 claims\n"
-            "/status - Stats da última hora\n\n"
+            "/status - Stats da última hora\n"
+            "/motivo24 - Motivos dos bloqueios (24h)\n\n"
             "<b>🎛️ Configuração (sem restart):</b>\n"
             "/progressive - Toggle rewards progressivos\n"
             "/fpblock - Toggle FP strict mode\n\n"
