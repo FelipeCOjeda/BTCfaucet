@@ -753,17 +753,18 @@ async def lifespan(app: FastAPI):
                         del _rate_store[ip]
                     if stale_ips:
                         logger.debug(f"Rate limiter cleanup: {len(stale_ips)} IPs removidos")
-                # Arquiva claims > 60 dias — uma vez por dia
+                # Limpa junk antigo (failed/orphan > 60 dias) — uma vez por dia
+                # Claims 'paid' NUNCA são deletados — preservam histórico de stats
                 if _time.time() - app.state.last_archive > 86400:
                     with get_db() as conn:
                         n = conn.execute("""
                             DELETE FROM claims
-                            WHERE status IN ('failed','paid')
+                            WHERE status IN ('failed','orphan')
                             AND claimed_at < datetime('now', '-60 days')
                         """).rowcount
                         conn.commit()
                     if n:
-                        logger.info(f"Archive: {n} claim(s) antigos removidos")
+                        logger.info(f"Cleanup: {n} claim(s) failed/orphan antigos removidos")
                     app.state.last_archive = _time.time()
                 # Verificar saldo LNvoltz e alertar admin se baixo
                 try:

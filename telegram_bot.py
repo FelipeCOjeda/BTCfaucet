@@ -442,55 +442,262 @@ def _hour_stats() -> str:
 
 
 def _motivo24() -> str:
-    """Motivos dos bloqueios em blocked_entities nas últimas 24h, por tipo."""
+    """Bloqueios dinâmicos (claims failed) nas últimas 24h + bloqueios manuais recentes."""
     try:
         import sqlite3
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
 
-        rows = conn.execute("""
+        total = conn.execute("""
+            SELECT COUNT(*) as c FROM claims
+            WHERE status = 'failed'
+            AND datetime(claimed_at) >= datetime('now', '-24 hours')
+        """).fetchone()["c"] or 0
+
+        top_lns = conn.execute("""
+            SELECT ln_address, COUNT(*) as c FROM claims
+            WHERE status = 'failed'
+            AND datetime(claimed_at) >= datetime('now', '-24 hours')
+            GROUP BY ln_address ORDER BY c DESC LIMIT 8
+        """).fetchall()
+
+        top_fps = conn.execute("""
+            SELECT fp_hash, COUNT(*) as c FROM claims
+            WHERE status = 'failed'
+            AND datetime(claimed_at) >= datetime('now', '-24 hours')
+            AND fp_hash IS NOT NULL
+            GROUP BY fp_hash ORDER BY c DESC LIMIT 8
+        """).fetchall()
+
+        top_ja3 = conn.execute("""
+            SELECT ja3_hash, COUNT(*) as c FROM claims
+            WHERE status = 'failed'
+            AND datetime(claimed_at) >= datetime('now', '-24 hours')
+            AND ja3_hash IS NOT NULL
+            GROUP BY ja3_hash ORDER BY c DESC LIMIT 5
+        """).fetchall()
+
+        top_ips = conn.execute("""
+            SELECT ip_address, COUNT(*) as c FROM claims
+            WHERE status = 'failed'
+            AND datetime(claimed_at) >= datetime('now', '-24 hours')
+            AND ip_address IS NOT NULL
+            GROUP BY ip_address ORDER BY c DESC LIMIT 8
+        """).fetchall()
+
+        manual_blocks = conn.execute("""
             SELECT entity_type, entity_value, reason, blocked_at
             FROM blocked_entities
             WHERE datetime(blocked_at) >= datetime('now', '-24 hours')
-            ORDER BY entity_type, blocked_at DESC
+            ORDER BY blocked_at DESC
         """).fetchall()
+
         conn.close()
 
-        if not rows:
+        if total == 0 and not manual_blocks:
             return "✅ <b>Nenhum bloqueio nas últimas 24h</b>"
 
-        buckets = {"ln": [], "fp": [], "ja3": [], "ip": [], "other": []}
-        for r in rows:
-            t = r["entity_type"]
-            key = t if t in buckets else "other"
-            buckets[key].append(r)
+        lines = [f"🚫 <b>Bloqueios 24h — {total} tentativas negadas</b>\n"]
 
-        labels = {
-            "ln": ("🔗", "LN Address"),
-            "fp": ("🖥️", "FP (Browser)"),
-            "ja3": ("🔐", "FP Agent (TLS/JA3)"),
-            "ip": ("🌐", "IP"),
-            "other": ("⚠️", "Outros"),
-        }
-
-        lines = [f"🚫 <b>Bloqueios últimas 24h — {len(rows)} entidade(s)</b>\n"]
-        for key, entries in buckets.items():
-            if not entries:
-                continue
-            icon, title = labels[key]
-            lines.append(f"{icon} <b>{title} ({len(entries)}):</b>")
-            for r in entries[:10]:
-                val = r["entity_value"]
-                val_trunc = val[:30] + "…" if len(val) > 30 else val
-                reason = r["reason"] or "—"
-                ts = (r["blocked_at"] or "")[:16]
-                lines.append(f"  • <code>{val_trunc}</code>\n    motivo: {reason} | {ts}")
-            if len(entries) > 10:
-                lines.append(f"  … e mais {len(entries) - 10}")
+        if top_lns:
+            lines.append("🔗 <b>LN Address bloqueados:</b>")
+            for r in top_lns:
+                ln = r["ln_address"]
+                ln_t = ln[:28] + "…" if len(ln) > 28 else ln
+                lines.append(f"  • <code>{ln_t}</code> — {r['c']}x")
             lines.append("")
+
+        if top_fps:
+            lines.append("🖥️ <b>FP (Browser):</b>")
+            for r in top_fps:
+                fp = (r["fp_hash"] or "")[:20] + "…"
+                lines.append(f"  • <code>{fp}</code> — {r['c']}x")
+            lines.append("")
+
+        if top_ja3:
+            lines.append("🔐 <b>FP Agent (JA3/TLS):</b>")
+            for r in top_ja3:
+                j = (r["ja3_hash"] or "")[:20] + "…"
+                lines.append(f"  • <code>{j}</code> — {r['c']}x")
+            lines.append("")
+
+        if top_ips:
+            lines.append("🌐 <b>IPs:</b>")
+            for r in top_ips:
+                lines.append(f"  • <code>{r['ip_address']}</code> — {r['c']}x")
+            lines.append("")
+
+        if manual_blocks:
+            lines.append(f"🔒 <b>Bloqueios manuais ({len(manual_blocks)}):</b>")
+            for r in manual_blocks[:10]:
+                val = r["entity_value"][:28] + "…" if len(r["entity_value"]) > 28 else r["entity_value"]
+                reason = r["reason"] or "—"
+                lines.append(f"  • [{r['entity_type']}] <code>{val}</code> — {reason}")
 
         return "\n".join(lines).rstrip()
 
+    except Exception as e:
+        return f"❌ Erro: {e}"
+
+
+# ============================================================================
+# CONSULTA DE PAGAMENTO ORPHAN
+# ============================================================================
+
+async def _consultar_pagamento(payment_hash: str) -> str:
+    """Consulta no LNbits se o pagamento foi realizado e mostra o claim no DB."""
+    payment_hash = payment_hash.strip().lower()
+    if not re.match(r'^[a-f0-9]{64}$', payment_hash):
+        return "❌ Hash inválido. Deve ter 64 caracteres hexadecimais."
+
+    # Busca o claim no banco
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        claim = conn.execute(
+            "SELECT id, ln_address, amount_sat, status, claimed_at, ip_address FROM claims WHERE payment_hash=? LIMIT 1",
+            (payment_hash,)
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        return f"❌ Erro ao consultar DB: {e}"
+
+    db_lines = []
+    if claim:
+        db_lines = [
+            f"📋 <b>Claim no DB:</b>",
+            f"  ID: <code>{claim['id']}</code>",
+            f"  Status: <code>{claim['status']}</code>",
+            f"  LN: <code>{claim['ln_address']}</code>",
+            f"  Valor: <b>{claim['amount_sat']} sats</b>",
+            f"  Data: {(claim['claimed_at'] or '')[:16]}",
+            f"  IP: <code>{claim['ip_address'] or 'N/A'}</code>",
+        ]
+    else:
+        db_lines = ["⚠️ Claim não encontrado no DB para este hash."]
+
+    # Consulta o LNbits
+    try:
+        headers = {"X-Api-Key": LNBITS_ADMIN_KEY}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
+                headers=headers,
+            )
+        if r.status_code == 404:
+            ln_status = "❌ <b>NÃO encontrado no LNbits</b> — pagamento nunca foi iniciado ou já expirou."
+            ln_paid = False
+        elif r.status_code != 200:
+            ln_status = f"⚠️ LNbits retornou HTTP {r.status_code}"
+            ln_paid = None
+        else:
+            data = r.json()
+            paid = data.get("paid") or (data.get("status") == "complete")
+            preimage = data.get("preimage") or data.get("payment_preimage") or ""
+            amount_msat = abs(data.get("amount") or data.get("details", {}).get("amount", 0))
+            amount_sat = amount_msat // 1000
+
+            if paid and preimage:
+                ln_status = (
+                    f"✅ <b>PAGO e confirmado no LNbits</b>\n"
+                    f"  Preimage: <code>{preimage[:32]}…</code>\n"
+                    f"  Valor: <b>{amount_sat} sats</b>"
+                )
+                ln_paid = True
+            elif data.get("status") == "failed":
+                ln_status = "❌ <b>FALHOU no LNbits</b> — roteamento não concluído."
+                ln_paid = False
+            else:
+                ln_status = f"⏳ <b>Status incerto no LNbits:</b> <code>{data.get('status','?')}</code>"
+                ln_paid = None
+    except Exception as e:
+        ln_status = f"❌ Erro ao consultar LNbits: {e}"
+        ln_paid = None
+
+    # Sugestão de ação
+    if ln_paid is True:
+        acao = (
+            f"\n💡 <b>Ação sugerida:</b> pagamento confirmado — marcar como paid:\n"
+            f"<code>/confirmar {payment_hash}</code>"
+        )
+    elif ln_paid is False:
+        acao = (
+            f"\n💡 <b>Ação sugerida:</b> pagamento não saiu — liberar re-claim:\n"
+            f"<code>/liberar {payment_hash}</code>"
+        )
+    else:
+        acao = (
+            f"\n💡 Status incerto. Use:\n"
+            f"<code>/confirmar {payment_hash}</code> — se os sats foram enviados\n"
+            f"<code>/liberar {payment_hash}</code> — para liberar re-claim"
+        )
+
+    lines = [f"🔍 <b>Consulta de pagamento</b>\n<code>{payment_hash[:32]}…</code>\n"]
+    lines += db_lines
+    lines += [f"\n{ln_status}", acao]
+    return "\n".join(lines)
+
+
+def _confirmar_pagamento(payment_hash: str) -> str:
+    """Marca o claim como 'paid' — sats foram enviados e confirmados."""
+    payment_hash = payment_hash.strip().lower()
+    if not re.match(r'^[a-f0-9]{64}$', payment_hash):
+        return "❌ Hash inválido."
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        claim = conn.execute(
+            "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
+            (payment_hash,)
+        ).fetchone()
+        if not claim:
+            conn.close()
+            return "❌ Claim não encontrado para este hash."
+        if claim["status"] == "paid":
+            conn.close()
+            return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>paid</code>."
+        conn.execute("UPDATE claims SET status='paid' WHERE payment_hash=?", (payment_hash,))
+        conn.commit()
+        conn.close()
+        return (
+            f"✅ <b>Claim {claim['id']} marcado como paid</b>\n"
+            f"LN: <code>{claim['ln_address']}</code>\n"
+            f"Valor: {claim['amount_sat']} sats\n"
+            f"Usuário bloqueado de re-claim pelo resto do dia."
+        )
+    except Exception as e:
+        return f"❌ Erro: {e}"
+
+
+def _liberar_claim(payment_hash: str) -> str:
+    """Marca o claim como 'failed' — sats não saíram, libera re-claim."""
+    payment_hash = payment_hash.strip().lower()
+    if not re.match(r'^[a-f0-9]{64}$', payment_hash):
+        return "❌ Hash inválido."
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        claim = conn.execute(
+            "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
+            (payment_hash,)
+        ).fetchone()
+        if not claim:
+            conn.close()
+            return "❌ Claim não encontrado para este hash."
+        if claim["status"] == "failed":
+            conn.close()
+            return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>failed</code>."
+        conn.execute("UPDATE claims SET status='failed' WHERE payment_hash=?", (payment_hash,))
+        conn.commit()
+        conn.close()
+        return (
+            f"🔓 <b>Claim {claim['id']} liberado para re-claim</b>\n"
+            f"LN: <code>{claim['ln_address']}</code>\n"
+            f"Usuário pode tentar novamente agora."
+        )
     except Exception as e:
         return f"❌ Erro: {e}"
 
@@ -641,6 +848,22 @@ async def handle_message(update: dict) -> Optional[str]:
     elif cmd == "/motivo24":
         return _motivo24()
 
+    # ─── CONSULTA ORPHAN ──────────────────────────────────────────────────────
+    elif cmd == "/consulta":
+        if not args:
+            return "❌ Uso: /consulta <payment_hash>"
+        return await _consultar_pagamento(args[0])
+
+    elif cmd == "/confirmar":
+        if not args:
+            return "❌ Uso: /confirmar <payment_hash>"
+        return _confirmar_pagamento(args[0])
+
+    elif cmd == "/liberar":
+        if not args:
+            return "❌ Uso: /liberar <payment_hash>"
+        return _liberar_claim(args[0])
+
     # ─── TOGGLE CONFIG ────────────────────────────────────────────────────
     elif cmd == "/progressive":
         from config import PROGRESSIVE_REWARDS
@@ -679,6 +902,10 @@ async def handle_message(update: dict) -> Optional[str]:
             "/recent - Últimos 10 claims\n"
             "/status - Stats da última hora\n"
             "/motivo24 - Motivos dos bloqueios (24h)\n\n"
+            "<b>🔍 Pagamentos orphan:</b>\n"
+            "/consulta &lt;hash&gt; - Verifica no LNbits se foi pago\n"
+            "/confirmar &lt;hash&gt; - Marca como paid (sats enviados)\n"
+            "/liberar &lt;hash&gt; - Marca como failed (libera re-claim)\n\n"
             "<b>🎛️ Configuração (sem restart):</b>\n"
             "/progressive - Toggle rewards progressivos\n"
             "/fpblock - Toggle FP strict mode\n\n"
