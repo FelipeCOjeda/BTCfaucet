@@ -340,7 +340,7 @@ CHALLENGE_PHRASES = {
 def is_address_blocked(ln_address: str) -> tuple[bool, int]:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT claimed_at FROM claims WHERE ln_address=? AND status='paid' ORDER BY claimed_at DESC LIMIT 1",
+            "SELECT claimed_at FROM claims WHERE ln_address=? AND status IN ('paid','orphan') ORDER BY claimed_at DESC LIMIT 1",
             (ln_address.lower(),)
         ).fetchone()
     if not row:
@@ -995,14 +995,30 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
         logger.error(f"resolve_ln_address error [{address}]: {e}")
         raise HTTPException(400, "Não foi possível contatar a wallet. Verifique o LN Address.")
 
+class PaymentInitiatedError(Exception):
+    """Pagamento foi enviado ao LNbits mas confirmação não chegou a tempo.
+    Marcar claim como orphan — NÃO como failed — para evitar re-claim duplo."""
+    def __init__(self, payment_hash: str):
+        super().__init__("Payment initiated but confirmation timed out")
+        self.payment_hash = payment_hash
+
+
 async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dict:
     """
-    Paga um invoice via LNbits (LNvoltz LND).
-    Confirma o pagamento via polling antes de retornar — evita o bug de 'falso paid'.
-    Retorna {"payment_hash": ..., "payment_preimage": ...} em caso de sucesso.
+    Paga um invoice via LNbits (LNvoltz LND) e aguarda confirmação.
+
+    Estratégia de polling em duas fases:
+    - Fase 1 (rápida): 10 checks × 3s = 30s
+    - Fase 2 (lenta):   4 checks × 60s = 4 min  → 5 tentativas total
+    - Definitivamente falhou (LNbits status=failed) → HTTPException(503)
+    - Incerto após 5ª tentativa (hash obtido, sem resposta) → PaymentInitiatedError
     """
     headers = {"X-Api-Key": LNBITS_ADMIN_KEY, "Content-Type": "application/json"}
 
+    last_payment_hash: str = ""
+    definitively_failed = False
+
+    # ── Envio do pagamento (retry só em falha de conexão, sem payment_hash) ──
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -1033,34 +1049,68 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
         data = r.json()
         payment_hash = data.get("payment_hash") or data.get("checking_id", "")
 
-        # Se já confirmado imediatamente (LNbits síncrono)
         if data.get("status") == "success" and data.get("preimage"):
-            logger.info(f"LNbits pagamento confirmado imediatamente (tentativa {attempt+1})")
+            logger.info(f"Pagamento confirmado imediatamente (tentativa {attempt+1})")
             return {"payment_hash": payment_hash, "payment_preimage": data["preimage"]}
 
-        # Polling de confirmação — até 30s
         if payment_hash:
-            for poll in range(10):
-                await asyncio.sleep(3)
-                try:
-                    async with httpx.AsyncClient(timeout=15) as pc:
-                        pr = await pc.get(
-                            f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
-                            headers=headers,
-                        )
-                    pd = pr.json()
-                    if pd.get("preimage") and pd.get("paid"):
-                        logger.info(f"LNbits pagamento confirmado no poll {poll+1} (tentativa {attempt+1})")
-                        return {"payment_hash": payment_hash, "payment_preimage": pd["preimage"]}
-                    if pd.get("status") == "failed":
-                        logger.warning(f"LNbits pagamento falhou no poll {poll+1}")
-                        break
-                except Exception as pe:
-                    logger.warning(f"Polling erro: {pe}")
+            last_payment_hash = payment_hash
+            break  # hash obtido — não reenvia o POST, só faz polling
 
-        logger.warning(f"pay_invoice tentativa {attempt+1}/3: sem confirmação após polling")
+        logger.warning(f"pay_invoice tentativa {attempt+1}/3: sem payment_hash")
         if attempt < 2:
             await asyncio.sleep(2 ** attempt)
+
+    if not last_payment_hash:
+        raise HTTPException(503, "Não foi possível processar o pagamento. Tente novamente.")
+
+    # ── Fase 1: polling rápido (10 × 3s = 30s) ───────────────────────────────
+    for poll in range(10):
+        await asyncio.sleep(3)
+        try:
+            async with httpx.AsyncClient(timeout=15) as pc:
+                pr = await pc.get(
+                    f"{LNBITS_URL}/api/v1/payment/{last_payment_hash}",
+                    headers=headers,
+                )
+            pd = pr.json()
+            if pd.get("preimage") and pd.get("paid"):
+                logger.info(f"Pagamento confirmado no poll rápido {poll+1}")
+                return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
+            if pd.get("status") == "failed":
+                definitively_failed = True
+                logger.warning(f"Pagamento falhou no poll rápido {poll+1}")
+                break
+        except Exception as pe:
+            logger.warning(f"Polling rápido erro {poll+1}: {pe}")
+
+    if definitively_failed:
+        raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
+
+    # ── Fase 2: polling lento — 4 tentativas × 60s (5 total com a fase rápida) ─
+    for slow in range(4):
+        logger.info(f"Aguardando confirmação: poll lento {slow+1}/4 | hash={last_payment_hash[:16]}…")
+        await asyncio.sleep(60)
+        try:
+            async with httpx.AsyncClient(timeout=15) as pc:
+                pr = await pc.get(
+                    f"{LNBITS_URL}/api/v1/payment/{last_payment_hash}",
+                    headers=headers,
+                )
+            pd = pr.json()
+            if pd.get("preimage") and pd.get("paid"):
+                logger.info(f"Pagamento confirmado no poll lento {slow+1}")
+                return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
+            if pd.get("status") == "failed":
+                definitively_failed = True
+                logger.warning(f"Pagamento falhou no poll lento {slow+1}")
+                break
+        except Exception as pe:
+            logger.warning(f"Polling lento erro {slow+1}: {pe}")
+
+    # Após 5ª tentativa sem confirmação definitiva — incerto, risco de duplo gasto
+    if not definitively_failed:
+        raise PaymentInitiatedError(last_payment_hash)
 
     raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
 
@@ -1529,6 +1579,30 @@ async def claim(req: ClaimRequest, request: Request):
             else:
                 success_msg = f"⚡ {reward_amount} sats!"
             return {"success": True, "message": success_msg, "payment_hash": payment_hash, "amount_sat": reward_amount, "fp_penalty": fp_penalty, "farm_decay": farm_decay}
+        except PaymentInitiatedError as e:
+            # LNbits iniciou o pagamento mas polling não confirmou — o sats pode ter saído.
+            # Marcar como orphan (não failed) para bloquear re-claim e evitar duplo gasto.
+            try:
+                with get_db() as conn:
+                    conn.execute(
+                        "UPDATE claims SET status='orphan', payment_hash=? WHERE id=?",
+                        (e.payment_hash, claim_id)
+                    )
+                    conn.commit()
+            except Exception as db_err:
+                logger.error(f"Falha ao marcar claim {claim_id} como orphan: {db_err}")
+            logger.critical(
+                f"ORPHAN: pagamento enviado mas não confirmado! "
+                f"claim_id={claim_id} ln={ln} hash={e.payment_hash}"
+            )
+            asyncio.create_task(send_alert(
+                f"⚠️ <b>Claim orphan — pagamento incerto</b>\n"
+                f"<b>LN:</b> <code>{ln}</code>\n"
+                f"<b>Hash:</b> <code>{e.payment_hash}</code>\n"
+                f"<b>IP:</b> <code>{ip}</code>\n"
+                f"Revisar manualmente se sats foram enviados."
+            ))
+            raise HTTPException(503, "Não foi possível confirmar o pagamento. Por segurança, aguarde alguns minutos antes de tentar novamente.")
         except HTTPException as e:
             with get_db() as conn:
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
