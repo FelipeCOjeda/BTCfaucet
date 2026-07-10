@@ -1073,7 +1073,7 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
         try:
             async with httpx.AsyncClient(timeout=15) as pc:
                 pr = await pc.get(
-                    f"{LNBITS_URL}/api/v1/payment/{last_payment_hash}",
+                    f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
                     headers=headers,
                 )
             pd = pr.json()
@@ -1097,7 +1097,7 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
         try:
             async with httpx.AsyncClient(timeout=15) as pc:
                 pr = await pc.get(
-                    f"{LNBITS_URL}/api/v1/payment/{last_payment_hash}",
+                    f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
                     headers=headers,
                 )
             pd = pr.json()

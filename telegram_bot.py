@@ -557,7 +557,7 @@ async def _check_lnbits_status(payment_hash: str) -> Tuple[Optional[bool], str]:
         headers = {"X-Api-Key": LNBITS_ADMIN_KEY}
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
-                f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
+                f"{LNBITS_URL}/api/v1/payments/{payment_hash}",
                 headers=headers,
             )
         if r.status_code == 404:
