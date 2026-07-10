@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import subprocess
+import time as _time
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -544,6 +545,46 @@ def _motivo24() -> str:
 # CONSULTA DE PAGAMENTO ORPHAN
 # ============================================================================
 
+async def _check_lnbits_status(payment_hash: str) -> Tuple[Optional[bool], str]:
+    """Consulta o LNbits para um payment_hash.
+
+    Retorna (ln_paid, ln_status_line):
+      ln_paid=True  -> pago e confirmado (preimage presente)
+      ln_paid=False -> não encontrado ou falhou (conclusivo, não saiu)
+      ln_paid=None  -> status incerto, precisa revisão manual
+    """
+    try:
+        headers = {"X-Api-Key": LNBITS_ADMIN_KEY}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
+                headers=headers,
+            )
+        if r.status_code == 404:
+            return False, "❌ <b>NÃO encontrado no LNbits</b> — pagamento nunca foi iniciado ou já expirou."
+        elif r.status_code != 200:
+            return None, f"⚠️ LNbits retornou HTTP {r.status_code}"
+
+        data = r.json()
+        paid = data.get("paid") or (data.get("status") == "complete")
+        preimage = data.get("preimage") or data.get("payment_preimage") or ""
+        amount_msat = abs(data.get("amount") or data.get("details", {}).get("amount", 0))
+        amount_sat = amount_msat // 1000
+
+        if paid and preimage:
+            return True, (
+                f"✅ <b>PAGO e confirmado no LNbits</b>\n"
+                f"  Preimage: <code>{preimage[:32]}…</code>\n"
+                f"  Valor: <b>{amount_sat} sats</b>"
+            )
+        elif data.get("status") == "failed":
+            return False, "❌ <b>FALHOU no LNbits</b> — roteamento não concluído."
+        else:
+            return None, f"⏳ <b>Status incerto no LNbits:</b> <code>{data.get('status','?')}</code>"
+    except Exception as e:
+        return None, f"❌ Erro ao consultar LNbits: {e}"
+
+
 async def _consultar_pagamento(payment_hash: str) -> str:
     """Consulta no LNbits se o pagamento foi realizado e mostra o claim no DB."""
     payment_hash = payment_hash.strip().lower()
@@ -577,43 +618,7 @@ async def _consultar_pagamento(payment_hash: str) -> str:
     else:
         db_lines = ["⚠️ Claim não encontrado no DB para este hash."]
 
-    # Consulta o LNbits
-    try:
-        headers = {"X-Api-Key": LNBITS_ADMIN_KEY}
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                f"{LNBITS_URL}/api/v1/payment/{payment_hash}",
-                headers=headers,
-            )
-        if r.status_code == 404:
-            ln_status = "❌ <b>NÃO encontrado no LNbits</b> — pagamento nunca foi iniciado ou já expirou."
-            ln_paid = False
-        elif r.status_code != 200:
-            ln_status = f"⚠️ LNbits retornou HTTP {r.status_code}"
-            ln_paid = None
-        else:
-            data = r.json()
-            paid = data.get("paid") or (data.get("status") == "complete")
-            preimage = data.get("preimage") or data.get("payment_preimage") or ""
-            amount_msat = abs(data.get("amount") or data.get("details", {}).get("amount", 0))
-            amount_sat = amount_msat // 1000
-
-            if paid and preimage:
-                ln_status = (
-                    f"✅ <b>PAGO e confirmado no LNbits</b>\n"
-                    f"  Preimage: <code>{preimage[:32]}…</code>\n"
-                    f"  Valor: <b>{amount_sat} sats</b>"
-                )
-                ln_paid = True
-            elif data.get("status") == "failed":
-                ln_status = "❌ <b>FALHOU no LNbits</b> — roteamento não concluído."
-                ln_paid = False
-            else:
-                ln_status = f"⏳ <b>Status incerto no LNbits:</b> <code>{data.get('status','?')}</code>"
-                ln_paid = None
-    except Exception as e:
-        ln_status = f"❌ Erro ao consultar LNbits: {e}"
-        ln_paid = None
+    ln_paid, ln_status = await _check_lnbits_status(payment_hash)
 
     # Sugestão de ação
     if ln_paid is True:
@@ -700,6 +705,86 @@ def _liberar_claim(payment_hash: str) -> str:
         )
     except Exception as e:
         return f"❌ Erro: {e}"
+
+
+# ============================================================================
+# RESOLUÇÃO AUTOMÁTICA DE CLAIMS ORPHAN
+# ============================================================================
+
+_orphan_uncertain_alerted: dict = {}  # payment_hash -> timestamp do último alerta
+_ORPHAN_ALERT_COOLDOWN = 3600  # não repete alerta de status incerto por 1h
+
+
+async def _auto_resolve_orphans() -> None:
+    """Roda a cada N minutos: consulta o LNbits para cada claim 'orphan' e
+    resolve automaticamente quando o status for conclusivo.
+
+    - Pago e confirmado (preimage)      -> marca 'paid'
+    - Não encontrado / falhou no LNbits -> marca 'failed' (libera re-claim)
+    - Status incerto                    -> mantém 'orphan', alerta manual (com cooldown)
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        orphans = conn.execute(
+            "SELECT id, payment_hash, ln_address, amount_sat FROM claims "
+            "WHERE status='orphan' AND payment_hash IS NOT NULL AND payment_hash != ''"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Auto-resolve orphans: erro ao consultar DB: {e}")
+        return
+
+    if not orphans:
+        return
+
+    resolved = []
+    still_uncertain = []
+
+    for row in orphans:
+        payment_hash = row["payment_hash"]
+        ln_paid, _ln_status = await _check_lnbits_status(payment_hash)
+
+        if ln_paid is True:
+            _confirmar_pagamento(payment_hash)
+            resolved.append(
+                f"✅ <b>Claim {row['id']}</b> auto-confirmado (paid)\n"
+                f"LN: <code>{row['ln_address']}</code> — {row['amount_sat']} sats"
+            )
+            logger.info(f"Auto-resolve: claim {row['id']} marcado paid (hash={payment_hash[:16]}...)")
+        elif ln_paid is False:
+            _liberar_claim(payment_hash)
+            resolved.append(
+                f"🔓 <b>Claim {row['id']}</b> auto-liberado (failed)\n"
+                f"LN: <code>{row['ln_address']}</code>"
+            )
+            logger.info(f"Auto-resolve: claim {row['id']} marcado failed (hash={payment_hash[:16]}...)")
+        else:
+            last_alert = _orphan_uncertain_alerted.get(payment_hash, 0)
+            if _time.time() - last_alert > _ORPHAN_ALERT_COOLDOWN:
+                _orphan_uncertain_alerted[payment_hash] = _time.time()
+                still_uncertain.append(
+                    f"⏳ <b>Claim {row['id']}</b> status incerto — revisar manualmente:\n"
+                    f"LN: <code>{row['ln_address']}</code>\n"
+                    f"<code>/consulta {payment_hash}</code>"
+                )
+
+    if resolved or still_uncertain:
+        parts = ["🔍 <b>Análise automática de claims orphan</b>"]
+        parts += resolved
+        parts += still_uncertain
+        await send_telegram(TELEGRAM_CHAT_ID, "\n\n".join(parts))
+
+
+async def run_orphan_check(interval_seconds: int = 300):
+    """Loop periódico — analisa e resolve claims orphan automaticamente (default: 5min)."""
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await _auto_resolve_orphans()
+        except Exception as e:
+            logger.error(f"Erro no orphan check: {e}")
 
 
 # ============================================================================

@@ -32,7 +32,7 @@ from config import (
     PHOENIXD_URL, PHOENIXD_PASSWORD, PHOENIX_MAX_FEE_SAT,
 )
 
-from telegram_bot import run_monitor, send_alert, poll_commands
+from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -792,11 +792,13 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(_periodic())
     tg_task = asyncio.create_task(run_monitor(interval_hours=1))
     cmd_task = asyncio.create_task(poll_commands())  # Bot de comandos
+    orphan_task = asyncio.create_task(run_orphan_check(interval_seconds=300))
     logger.info("BTCFaucet iniciado ✓")
     yield
     task.cancel()
     tg_task.cancel()
     cmd_task.cancel()
+    orphan_task.cancel()
     await app.state.http_client.aclose()
     logger.info("BTCFaucet encerrado")
 
