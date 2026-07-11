@@ -304,6 +304,56 @@ def verify_pow(seed: str, nonce: int, difficulty: int = 4) -> bool:
         return False
     return hashlib.sha256(f"{seed}:{nonce}".encode()).hexdigest().startswith("0" * difficulty)
 
+
+# ── PoW server-issued (assinado + single-use + expiração) ─────────────────────
+# Sem isto o PoW é inútil: o cliente escolhe o próprio seed, que nunca expira e
+# pode ser reutilizado à vontade. Aqui o servidor emite o seed assinado com HMAC
+# (chave = BANNER_SECRET), com timestamp embutido, e o consome apenas uma vez.
+import secrets as _secrets
+
+POW_DIFFICULTY  = 4
+POW_MAX_AGE     = 900   # seed vale por 15 min
+POW_CLOCK_SKEW  = 60    # tolerância de relógio
+_used_pow_seeds: dict[str, float] = {}  # seed -> instante em que pode ser esquecido
+
+
+def _pow_sign(seed: str) -> str:
+    return hmac.new(BANNER_SECRET.encode(), seed.encode(), hashlib.sha256).hexdigest()
+
+
+def issue_pow_challenge() -> dict:
+    ts = int(_time.time())
+    seed = f"{ts}.{_secrets.token_hex(12)}"
+    return {"seed": seed, "sig": _pow_sign(seed), "difficulty": POW_DIFFICULTY}
+
+
+def verify_pow_challenge(seed: str, sig: str, nonce: Optional[int]) -> bool:
+    """Valida seed emitido pelo servidor: assinatura, validade, PoW e uso único."""
+    if not seed or not sig or nonce is None:
+        return False
+    # 1) Assinatura HMAC (constant-time) — impede seeds forjados pelo cliente
+    if not hmac.compare_digest(_pow_sign(seed), sig):
+        return False
+    # 2) Timestamp embutido dentro da janela de validade
+    try:
+        ts = int(seed.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return False
+    now = _time.time()
+    if ts > now + POW_CLOCK_SKEW or ts < now - POW_MAX_AGE:
+        return False
+    # 3) Proof of Work de fato resolvido
+    if not verify_pow(seed, nonce, POW_DIFFICULTY):
+        return False
+    # 4) Uso único — limpa expirados e rejeita replay
+    for s, forget_at in list(_used_pow_seeds.items()):
+        if forget_at < now:
+            del _used_pow_seeds[s]
+    if seed in _used_pow_seeds:
+        return False
+    _used_pow_seeds[seed] = ts + POW_MAX_AGE + POW_CLOCK_SKEW
+    return True
+
 # ── Desafio Anti-Bot ──────────────────────────────────────────────────────────
 CHALLENGE_PHRASES = {
     "bitcoin é liberdade","sats para todos","eu sou humano","chave sua bitcoin",
@@ -903,6 +953,7 @@ class ClaimRequest(BaseModel):
     challenge_phrase: Optional[str] = None
     pow_nonce:        Optional[int] = None
     pow_seed:         Optional[str] = None
+    pow_sig:          Optional[str] = None
 
 async def verify_hcaptcha(token: str) -> bool:
     async with httpx.AsyncClient() as client:
@@ -1132,6 +1183,14 @@ async def api_config(request: Request):
         raise HTTPException(429, "Muitas requisições.")
     return {"hcaptcha_sitekey": HCAPTCHA_SITEKEY, "amount_sat": FAUCET_AMOUNT_SAT, "cooldown_hours": COOLDOWN_HOURS, "cooldown_type": "midnight"}
 
+@app.get("/api/pow-challenge")
+async def api_pow_challenge(request: Request):
+    """Emite um seed de PoW assinado pelo servidor (single-use, expira em 15min)."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(ip, max_req=30, window=60):
+        raise HTTPException(429, "Muitas requisições.")
+    return issue_pow_challenge()
+
 @app.post("/api/check-suspect")
 async def check_suspect(body: dict, request: Request):
     """Retorna se LN address pertence a domínio suspeito (dose dupla)."""
@@ -1324,12 +1383,13 @@ async def claim(req: ClaimRequest, request: Request):
             logger.warning(f"Challenge inválido: '{raw_phrase[:30]}' ip={ip} ln={ln}")
             raise HTTPException(403, "Desafio de verificação inválido. Recarregue a página e tente novamente.")
 
-    # 2c – Verificar Proof of Work (bypass para WHITELIST e WHITELIST_ADM)
+    # 2c – Verificar Proof of Work emitido pelo servidor (bypass p/ WHITELIST/ADM)
     if not _is_whitelisted:
         pow_seed  = (req.pow_seed or "").strip()
+        pow_sig   = (req.pow_sig or "").strip()
         pow_nonce = req.pow_nonce
-        if not pow_seed or pow_nonce is None or not verify_pow(pow_seed, pow_nonce):
-            logger.warning(f"PoW inválido: seed={pow_seed[:20]} nonce={pow_nonce} ip={ip} ln={ln}")
+        if not verify_pow_challenge(pow_seed, pow_sig, pow_nonce):
+            logger.warning(f"PoW inválido: seed={pow_seed[:24]} nonce={pow_nonce} ip={ip} ln={ln}")
             raise HTTPException(403, "Verificação de segurança falhou. Recarregue a página e tente novamente.")
 
     # 3 – Rate limits (pós-captcha)
@@ -1369,6 +1429,7 @@ async def claim(req: ClaimRequest, request: Request):
     if not acquired:
         raise HTTPException(429, "Requisição em andamento para este endereço. Aguarde.")
 
+    wallet_lock_key = None  # lock adicional por wallet_hash (serializa LN addresses distintos → mesma carteira)
     try:
         # Double-check pós-lock (TOCTOU): re-verifica todos os cooldowns após adquirir lock
         if ln not in config.WHITELIST_ADM:
@@ -1475,6 +1536,17 @@ async def claim(req: ClaimRequest, request: Request):
             bolt11, wallet_hash = await resolve_ln_address(ln, reward_amount, http_client=http)
             # Verificar se carteira já foi vista com outro LN address
             if ln not in config.WHITELIST_ADM and ln not in config.WHITELIST:
+                # Serializar por wallet_hash: sem isto, dois LN addresses distintos
+                # apontando para a mesma carteira passam na checagem concorrentemente
+                # (nenhum registrado ainda) e ambos são pagos (TOCTOU).
+                wallet_lock_key = f"wallet:{wallet_hash}"
+                if not await acquire_claim_lock(wallet_lock_key):
+                    wallet_lock_key = None
+                    with get_db() as conn:
+                        conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                        conn.commit()
+                    raise HTTPException(429, "Requisição em andamento para esta carteira. Aguarde.")
+
                 wh_blocked, wh_original = check_wallet_fingerprint(wallet_hash, ln)
                 if wh_blocked:
                     logger.warning(
@@ -1633,8 +1705,10 @@ async def claim(req: ClaimRequest, request: Request):
             raise
 
     finally:
-        # Sempre libera o lock, mesmo em exceção
+        # Sempre libera os locks, mesmo em exceção
         release_claim_lock(ln)
+        if wallet_lock_key:
+            release_claim_lock(wallet_lock_key)
 
 
 WOS_DOMAINS = {"walletofsatoshi.com", "livingroomofsatoshi.com"}
@@ -1697,36 +1771,62 @@ async def claim_fallback(body: dict, request: Request):
 
     reward_amount = claim["amount_sat"]
 
-    # Resolver endereço alternativo e pagar
+    # Lock por claim_id — previne double-pay em requests concorrentes com o mesmo claim
+    lock_key = f"fallback:{claim_id}"
+    if not await acquire_claim_lock(lock_key):
+        raise HTTPException(429, "Reenvio em andamento para este claim. Aguarde.")
+
     try:
-        async with httpx.AsyncClient(timeout=30) as http:
-            bolt11, wallet_hash = await resolve_ln_address(alt_ln, reward_amount * 1000, http_client=http)
-            result = await pay_invoice(bolt11)
-            payment_hash = result.get("payment_hash", "")
-            dest_pubkey = decode_bolt11_pubkey(bolt11)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"claim_fallback error: {e}")
-        raise HTTPException(500, "Erro ao processar pagamento alternativo.")
+        # Re-verificar status dentro do lock (TOCTOU): consome atomicamente o claim
+        # 'failed' marcando-o 'pending' — se outra request já consumiu, aborta.
+        with get_db() as conn:
+            claimed = conn.execute(
+                "UPDATE claims SET status='pending' WHERE id=? AND status='failed'",
+                (claim_id,)
+            ).rowcount
+            conn.commit()
+        if not claimed:
+            raise HTTPException(400, "Claim já processado ou expirado.")
 
-    # Atualizar claim: marcar como pago com endereço alternativo
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE claims SET status='paid', ln_address=?, payment_hash=?, destination_pubkey=? WHERE id=?",
-            (alt_ln, payment_hash, dest_pubkey, claim_id)
-        )
-        conn.commit()
+        # Resolver endereço alternativo e pagar (reward_amount já está em sats)
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                bolt11, wallet_hash = await resolve_ln_address(alt_ln, reward_amount, http_client=http)
+                result = await pay_invoice(bolt11, http_client=http)
+                payment_hash = result.get("payment_hash", "")
+                dest_pubkey = decode_bolt11_pubkey(bolt11)
+        except HTTPException:
+            # Reverter para 'failed' para permitir nova tentativa de fallback
+            with get_db() as conn:
+                conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                conn.commit()
+            raise
+        except Exception as e:
+            logger.error(f"claim_fallback error: {e}")
+            with get_db() as conn:
+                conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                conn.commit()
+            raise HTTPException(500, "Erro ao processar pagamento alternativo.")
 
-    register_wallet_fingerprint(wallet_hash, alt_ln)
-    logger.info(f"Fallback OK: WoS→{alt_ln} | claim_id={claim_id} | hash={payment_hash[:16]}...")
+        # Atualizar claim: marcar como pago com endereço alternativo
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE claims SET status='paid', ln_address=?, payment_hash=?, destination_pubkey=? WHERE id=?",
+                (alt_ln, payment_hash, dest_pubkey, claim_id)
+            )
+            conn.commit()
 
-    return {
-        "success": True,
-        "message": f"⚡ {reward_amount} sats enviados para {alt_ln}!",
-        "payment_hash": payment_hash,
-        "amount_sat": reward_amount,
-    }
+        register_wallet_fingerprint(wallet_hash, alt_ln)
+        logger.info(f"Fallback OK: WoS→{alt_ln} | claim_id={claim_id} | hash={payment_hash[:16]}...")
+
+        return {
+            "success": True,
+            "message": f"⚡ {reward_amount} sats enviados para {alt_ln}!",
+            "payment_hash": payment_hash,
+            "amount_sat": reward_amount,
+        }
+    finally:
+        release_claim_lock(lock_key)
 
 
 # [FIX #7] Proxy LNURL com sanitização de username e cb_id

@@ -697,6 +697,23 @@ window.addEventListener('DOMContentLoaded', () => {
 let _powNonce = null;
 let _powHash  = null;
 let _powTarget = '';
+let _powSig    = '';
+
+// Busca um seed de PoW assinado pelo servidor e resolve o desafio.
+// O seed não pode mais ser inventado pelo cliente: é assinado (HMAC),
+// expira em 15min e só pode ser usado uma vez.
+async function fetchAndRunPoW() {
+  _powNonce = null; _powHash = null; _powTarget = ''; _powSig = '';
+  try {
+    const r = await fetch(`${API}/api/pow-challenge`);
+    const d = await r.json();
+    _powSig = d.sig || '';
+    await runPoW(d.seed, d.difficulty || 4);
+  } catch (e) {
+    // Sem seed do servidor o claim será rejeitado; o usuário pode recarregar.
+    console.warn('pow-challenge falhou', e);
+  }
+}
 
 async function sha256hex(str) {
   const buf = new TextEncoder().encode(str);
@@ -1015,10 +1032,9 @@ function goStep3() {
   document.getElementById('dot-2').classList.replace('active','done');
   document.getElementById('dot-3').classList.add('active');
   loadChallenge();
-  // Iniciar PoW em background enquanto usuário digita a frase
-  const powSeed = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  _powTarget = powSeed;
-  runPoW(powSeed, 4);  // 4 zeros = ~1-3s de CPU
+  // Iniciar PoW em background enquanto usuário digita a frase.
+  // Seed vem assinado do servidor (single-use, expira em 15min).
+  fetchAndRunPoW();
 }
 
 // Habilita botão step1 ao digitar endereço válido
@@ -1101,6 +1117,7 @@ async function doClaim() {
       challenge_phrase: _isSuspectDomain ? (_currentPhrase2 + "|" + _currentPhrase) : _currentPhrase,
       pow_nonce:        _powNonce,
       pow_seed:         _powTarget,
+      pow_sig:          _powSig,
       canvas_hash:      _canvasHash
     })});
     const d = await r.json();
@@ -1154,6 +1171,10 @@ async function doClaim() {
     btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
   }
   hcaptcha.reset();
+  // O seed de PoW é single-use: prepara um novo para uma eventual re-tentativa.
+  if (document.getElementById('step-3').classList.contains('active')) {
+    fetchAndRunPoW();
+  }
 }
 
 function showMsg(type, text) {
