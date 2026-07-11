@@ -1,0 +1,14 @@
+# Regra sudoers para o BTCFaucet controlar apenas seu próprio serviço, sem senha.
+# Substitui o antigo esquema de SUDO_PASS em texto plano no .env.
+#
+# INSTALAÇÃO (como root):
+#   sudo cp security/sudoers.d-ln-faucet /etc/sudoers.d/ln-faucet
+#   sudo chmod 440 /etc/sudoers.d/ln-faucet
+#   sudo visudo -c            # valida a sintaxe
+#
+# Depois, remova SUDO_PASS / SUDO_PASSWORD do .env.
+#
+# Ajuste o usuário (felipe) e o nome do serviço (ln-faucet) se necessário.
+
+felipe ALL=(root) NOPASSWD: /usr/bin/systemctl start ln-faucet, /usr/bin/systemctl stop ln-faucet, /usr/bin/systemctl restart ln-faucet, /usr/bin/systemctl status ln-faucet
+felipe ALL=(root) NOPASSWD: /bin/systemctl start ln-faucet, /bin/systemctl stop ln-faucet, /bin/systemctl restart ln-faucet, /bin/systemctl status ln-faucet

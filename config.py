@@ -58,6 +58,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 
+# ── Telegram Admin allowlist (user IDs autorizados a executar comandos) ───────
+# Sem isto, qualquer membro do grupo TELEGRAM_CHAT_ID controla o serviço.
+# Descubra seu ID enviando /whoami ao bot. Múltiplos IDs separados por vírgula.
+TELEGRAM_ADMIN_IDS_RAW = os.getenv("TELEGRAM_ADMIN_IDS", "")
+TELEGRAM_ADMIN_IDS = {i.strip() for i in TELEGRAM_ADMIN_IDS_RAW.split(",") if i.strip()}
+
 # ── Telegram Bot 2 (Status Monitor) ───────────────────────────────────────────
 TELEGRAM_BOT2_TOKEN = os.getenv("TELEGRAM_BOT2_TOKEN", "")
 TELEGRAM_BOT2_ENABLED = bool(TELEGRAM_BOT2_TOKEN)

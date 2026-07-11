@@ -19,7 +19,7 @@ from config import (
     LNBITS_ADMIN_KEY,
     LNBITS_URL,
     SERVICE_NAME,
-    SUDO_PASS,
+    TELEGRAM_ADMIN_IDS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     TELEGRAM_ENABLED,
@@ -226,8 +226,17 @@ def _whitelist_list() -> str:
 # SYSTEMCTL (restart/stop/start)
 # ============================================================================
 
+_ALLOWED_SYSTEMCTL_ACTIONS = {"restart", "stop", "start", "status"}
+
+
 def _systemctl(action: str) -> Tuple[bool, str]:
-    """Executa comando systemctl no serviço do faucet usando sudo -S com senha do .env."""
+    """Executa systemctl no serviço do faucet via `sudo -n` (non-interactive).
+
+    Requer uma regra sudoers NOPASSWD restrita a estes comandos exatos — ver
+    sudoers.d/ln-faucet no repositório. Nenhuma senha é armazenada nem trafega.
+    """
+    if action not in _ALLOWED_SYSTEMCTL_ACTIONS:
+        return False, f"❌ Ação inválida: {action}"
     try:
         labels = {
             "restart": ("🔄", "reiniciado"),
@@ -238,12 +247,11 @@ def _systemctl(action: str) -> Tuple[bool, str]:
 
         icon, verb = labels.get(action, ("⚙️", action))
 
-        cmd = ["sudo", "-S", "systemctl", action, SERVICE_NAME]
-        stdin_input = (SUDO_PASS + "\n") if SUDO_PASS else None
+        # -n: nunca pede senha; falha imediatamente se sudoers não permitir.
+        cmd = ["sudo", "-n", "systemctl", action, SERVICE_NAME]
 
         result = subprocess.run(
             cmd,
-            input=stdin_input,
             capture_output=True,
             text=True,
             timeout=30
@@ -252,7 +260,10 @@ def _systemctl(action: str) -> Tuple[bool, str]:
         if result.returncode == 0:
             return True, f"{icon} <b>Serviço {verb} com sucesso</b>"
         else:
-            err = result.stderr.replace(SUDO_PASS, "***") if SUDO_PASS else result.stderr
+            err = (result.stderr or "").strip()
+            if "password" in err.lower() or "a terminal" in err.lower():
+                err = ("sudo pediu senha — instale a regra sudoers NOPASSWD "
+                       "(sudoers.d/ln-faucet). Detalhe: " + err)
             return False, f"❌ Erro ({result.returncode}):\n<pre>{err[:500]}</pre>"
 
     except subprocess.TimeoutExpired:
@@ -838,6 +849,7 @@ async def handle_message(update: dict) -> Optional[str]:
     msg = update.get("message", {})
     text = (msg.get("text") or "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
+    user_id = str(msg.get("from", {}).get("id", ""))
     username = msg.get("from", {}).get("username", "unknown")
 
     if not text or chat_id != TELEGRAM_CHAT_ID:
@@ -845,6 +857,26 @@ async def handle_message(update: dict) -> Optional[str]:
 
     cmd = text.split()[0].lower()
     args = text.split()[1:] if len(text.split()) > 1 else []
+
+    # /whoami — sempre disponível, para o admin descobrir o próprio user_id
+    if cmd == "/whoami":
+        return (
+            f"🆔 <b>Seu user_id:</b> <code>{user_id}</code>\n"
+            f"<b>chat_id:</b> <code>{chat_id}</code>\n\n"
+            f"Adicione o user_id em <code>TELEGRAM_ADMIN_IDS</code> no .env para autorizar comandos."
+        )
+
+    # Autorização por user_id — só o chat_id não basta (em grupos qualquer membro
+    # adicionado ganharia controle total do serviço e da lógica anti-fraude).
+    if TELEGRAM_ADMIN_IDS:
+        if user_id not in TELEGRAM_ADMIN_IDS:
+            logger.warning(f"Comando negado — user_id={user_id} (@{username}) não autorizado: {text[:40]}")
+            return "🚫 Não autorizado. Use /whoami e peça ao admin para autorizar seu ID."
+    else:
+        logger.warning(
+            f"TELEGRAM_ADMIN_IDS vazio — comando aceito só por chat_id (INSEGURO). "
+            f"Configure a allowlist. user_id={user_id} cmd={cmd}"
+        )
 
     # ─── BLOQUEIOS ────────────────────────────────────────────────────────
     if cmd == "/block_ip":
@@ -994,6 +1026,8 @@ async def handle_message(update: dict) -> Optional[str]:
             "<b>🎛️ Configuração (sem restart):</b>\n"
             "/progressive - Toggle rewards progressivos\n"
             "/fpblock - Toggle FP strict mode\n\n"
+            "<b>🔑 Acesso:</b>\n"
+            "/whoami - Mostra seu user_id (p/ allowlist)\n\n"
             "/help - Esta mensagem"
         )
         return response
