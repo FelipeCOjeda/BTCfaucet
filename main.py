@@ -956,13 +956,20 @@ class ClaimRequest(BaseModel):
     pow_sig:          Optional[str] = None
 
 async def verify_hcaptcha(token: str) -> bool:
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://hcaptcha.com/siteverify",
-            data={"secret": HCAPTCHA_SECRET, "response": token},
-            timeout=10,
-        )
-        return resp.json().get("success", False)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://hcaptcha.com/siteverify",
+                data={"secret": HCAPTCHA_SECRET, "response": token},
+                timeout=10,
+            )
+        data = resp.json()
+        if not data.get("success", False):
+            logger.warning(f"hCaptcha rejeitado: {data.get('error-codes')}")
+        return data.get("success", False)
+    except Exception as e:
+        logger.error(f"hCaptcha verify falhou (exception): {e}")
+        return False
 
 # ── Wallet Fingerprint (identifica carteira real independente do LN address) ──
 import hashlib as _hashlib
@@ -1355,7 +1362,8 @@ async def claim(req: ClaimRequest, request: Request):
     if HCAPTCHA_SECRET != "0x0000000000000000000000000000000000000000":
         import re as _re_cap
         ct = (req.captcha_token or "").strip()
-        if not ct or len(ct) > 2048 or not _re_cap.match(r'^[A-Za-z0-9_.\-]+$', ct):
+        if not ct or len(ct) > 8192 or not _re_cap.match(r'^[A-Za-z0-9_.\-]+$', ct):
+            logger.warning(f"Captcha token rejeitado no formato: len={len(ct)} ip={ip} ln={ln}")
             raise HTTPException(400, "Captcha inválido.")
         ok = await verify_hcaptcha(ct)
         if not ok:
