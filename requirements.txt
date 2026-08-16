@@ -5,3 +5,6 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 coincurve==21.0.0
 
+# dev / testes
+pytest>=8.0.0
+

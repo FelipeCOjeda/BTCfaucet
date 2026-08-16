@@ -88,12 +88,12 @@ def _block_entity(entity_type: str, value: str, reason: str = "manual") -> Tuple
         if entity_type == "ln" and "@" not in value:
             return False, f"❌ LN address inválido: {value}"
 
-        success = block_entity(entity_type, value)
+        success, msg = block_entity(entity_type, value)
 
         if success:
             return True, f"✅ Bloqueado: <code>{value}</code>\n⚡ Ativo imediatamente (sem restart)"
         else:
-            return False, "❌ Já estava bloqueado"
+            return False, msg
 
     except Exception as e:
         return False, f"❌ Erro: {e}"
@@ -108,12 +108,12 @@ def _unblock_entity(entity_type: str, value: str) -> Tuple[bool, str]:
             return False, f"❌ Tipo inválido: {entity_type}"
 
         value = value.strip().lower()
-        removed = unblock_entity(entity_type, value)
+        success, msg = unblock_entity(entity_type, value)
 
-        if removed:
-            return True, f"✅ Desbloqueado: {removed}\n⚡ Ativo imediatamente (sem restart)"
+        if success:
+            return True, f"✅ Desbloqueado: <code>{value}</code>\n⚡ Ativo imediatamente (sem restart)"
         else:
-            return False, "❌ Não estava bloqueado"
+            return False, msg
 
     except Exception as e:
         return False, f"❌ Erro: {e}"
@@ -796,6 +796,78 @@ async def run_orphan_check(interval_seconds: int = 300):
             await _auto_resolve_orphans()
         except Exception as e:
             logger.error(f"Erro no orphan check: {e}")
+
+
+# ============================================================================
+# DETECÇÃO AUTOMÁTICA DE CORRELAÇÃO (FARM)
+# ============================================================================
+# Antes, a única forma de achar "mesmo IP pagando para LN addresses diferentes
+# em pouco tempo" era investigação manual ad-hoc no DB. Este job roda sozinho
+# e alerta assim que o padrão aparece — não bloqueia automaticamente (para não
+# gerar falso positivo em IP compartilhado legítimo), só avisa o admin com o
+# comando pronto para revisar e bloquear.
+
+_farm_alerted: dict = {}  # (ip, tuple(ln_addresses)) -> timestamp do último alerta
+_FARM_ALERT_COOLDOWN = 3600  # não repete o mesmo alerta por 1h
+_FARM_CHECK_WINDOW_MINUTES = 30
+
+
+async def _check_farm_correlation() -> None:
+    """Detecta o mesmo IP com claims pagos para LN addresses diferentes numa
+    janela curta — a assinatura de farm já confirmada manualmente no projeto
+    (mesmo IP, contas diferentes, minutos ou segundos de diferença)."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT ip_address, ln_address
+            FROM claims
+            WHERE status='paid'
+              AND claimed_at >= datetime('now', ?)
+              AND ip_address IS NOT NULL AND ip_address != ''
+            """,
+            (f"-{_FARM_CHECK_WINDOW_MINUTES} minutes",)
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Farm correlation check: erro ao consultar DB: {e}")
+        return
+
+    by_ip: dict = {}
+    for r in rows:
+        by_ip.setdefault(r["ip_address"], set()).add(r["ln_address"])
+
+    for ip, addrs in by_ip.items():
+        if len(addrs) < 2:
+            continue
+        key = (ip, tuple(sorted(addrs)))
+        last_alert = _farm_alerted.get(key, 0)
+        if _time.time() - last_alert < _FARM_ALERT_COOLDOWN:
+            continue
+        _farm_alerted[key] = _time.time()
+
+        addr_list = "\n".join(f"• <code>{a}</code>" for a in sorted(addrs))
+        await send_telegram(
+            TELEGRAM_CHAT_ID,
+            f"🚨 <b>Possível farm detectado</b>\n"
+            f"Mesmo IP <code>{ip}</code> pagou para {len(addrs)} LN addresses "
+            f"diferentes nos últimos {_FARM_CHECK_WINDOW_MINUTES}min:\n{addr_list}\n\n"
+            f"Revisar e, se confirmado, bloquear:\n"
+            f"<code>/block_ip {ip}</code>"
+        )
+        logger.warning(f"Farm correlation: IP {ip} com {len(addrs)} LN addresses em {_FARM_CHECK_WINDOW_MINUTES}min")
+
+
+async def run_farm_check(interval_seconds: int = 900):
+    """Loop periódico — detecção automática de correlação de farm (default: 15min)."""
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await _check_farm_correlation()
+        except Exception as e:
+            logger.error(f"Erro no farm check: {e}")
 
 
 # ============================================================================

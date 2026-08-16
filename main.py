@@ -32,7 +32,7 @@ from config import (
     PHOENIXD_URL, PHOENIXD_PASSWORD, PHOENIX_MAX_FEE_SAT,
 )
 
-from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check
+from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check, run_farm_check
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -103,7 +103,7 @@ def get_client_ip(request: Request) -> str:
 
 def get_ja3(request: Request) -> str:
     """Extrai JA3 fingerprint do header Cloudflare (se disponível)."""
-    return request.headers.get("CF-ray", "")[:16]
+    return request.headers.get("CF-JA3-Hash", "")
 
 def get_fp(request: Request) -> Optional[str]:
     """Extrai fp_hash do header customizado (legado)."""
@@ -179,11 +179,17 @@ def _bolt11_convertbits(data, frombits, tobits, pad=True):
 def decode_bolt11_pubkey(bolt11: str) -> str:
     """
     Extrai o node pubkey de destino de um bolt11 usando coincurve.
-    
-    Estratégia:
-    1. Verificar campo 'n' (tag=19) — pubkey explícito (presente em alguns wallets)
-    2. Recuperar via ECDSA recovery da assinatura (funciona com qualquer bolt11)
-    
+
+    Estratégia (nessa ordem — [FIX] invertida deliberadamente):
+    1. Recuperar via ECDSA recovery da assinatura — é a fonte de verdade,
+       derivada criptograficamente de quem realmente assinou o invoice.
+       Funciona com qualquer bolt11 válido.
+    2. Só usa o campo opcional 'n' (tag=19) como fallback, quando a
+       recuperação ECDSA não é possível (ex: coincurve ausente). Esse campo
+       é auto-declarado por quem GERA o invoice — um LNURLp malicioso
+       controlado pelo próprio atacante pode colocar ali qualquer valor,
+       então nunca deve ser a única fonte usada para decisões de bloqueio.
+
     Retorna hex do pubkey comprimido (66 chars) ou '' se falhar.
     """
     try:
@@ -191,7 +197,41 @@ def decode_bolt11_pubkey(bolt11: str) -> str:
         if not hrp or not data5 or len(data5) < 110:
             return ""
 
-        # ── Estratégia 1: campo 'n' (tag=19) ─────────────────────────────────
+        # ── Estratégia 1: ECDSA recovery via coincurve (fonte de verdade) ────
+        recovered = ""
+        try:
+            import coincurve
+            import hashlib
+
+            # Assinatura: últimos 104 grupos de 5-bit = 65 bytes (64 sig + 1 recovery)
+            sig_data5 = data5[-104:]
+            sig_bytes = _bolt11_convertbits(sig_data5, 5, 8, False)
+            if sig_bytes and len(sig_bytes) >= 65:
+                recovery_flag = sig_bytes[64] & 0x03
+                sig_der = bytes(sig_bytes[:64])
+
+                # Mensagem assinada = SHA256(SHA256(hrp_bytes + data_bytes_sem_sig))
+                hrp_bytes = hrp.encode('ascii')
+                data_no_sig = data5[:-104]
+                data_bytes = bytes(_bolt11_convertbits(data_no_sig, 5, 8, False) or [])
+                msg_preimage = hrp_bytes + data_bytes
+                msg_hash = hashlib.sha256(hashlib.sha256(msg_preimage).digest()).digest()
+
+                pubkey = coincurve.PublicKey.from_signature_and_message(
+                    sig_der + bytes([recovery_flag]),
+                    msg_hash,
+                    hasher=None  # já fizemos o hash manualmente
+                )
+                recovered = pubkey.format(compressed=True).hex()
+        except ImportError:
+            logger.warning("coincurve não instalado — pubkey recovery indisponível, usando fallback 'n'")
+        except Exception as e:
+            logger.debug(f"coincurve recovery falhou: {e}")
+
+        if recovered:
+            return recovered
+
+        # ── Estratégia 2 (fallback): campo 'n' (tag=19) ──────────────────────
         i = 7  # pular timestamp (7 grupos de 5-bit)
         while i < len(data5) - 104:
             if i + 2 >= len(data5) - 104:
@@ -207,47 +247,71 @@ def decode_bolt11_pubkey(bolt11: str) -> str:
                     return bytes(pk_bytes).hex()
             i += dlen
 
-        # ── Estratégia 2: ECDSA recovery via coincurve ───────────────────────
-        try:
-            import coincurve
-        except ImportError:
-            logger.warning("coincurve não instalado — pubkey recovery indisponível")
-            return ""
-
-        # Assinatura: últimos 104 grupos de 5-bit = 65 bytes (64 sig + 1 recovery)
-        sig_data5 = data5[-104:]
-        sig_bytes = _bolt11_convertbits(sig_data5, 5, 8, False)
-        if not sig_bytes or len(sig_bytes) < 65:
-            return ""
-
-        recovery_flag = sig_bytes[64] & 0x03
-        sig_der = bytes(sig_bytes[:64])
-
-        # Mensagem assinada = SHA256(SHA256(hrp_bytes + data_bytes_sem_sig))
-        hrp_bytes = hrp.encode('ascii')
-        # Converter data sem assinatura para bytes
-        data_no_sig = data5[:-104]
-        data_bytes = bytes(_bolt11_convertbits(data_no_sig, 5, 8, False) or [])
-        
-        import hashlib
-        msg_preimage = hrp_bytes + data_bytes
-        msg_hash = hashlib.sha256(hashlib.sha256(msg_preimage).digest()).digest()
-
-        # Recuperar pubkey
-        try:
-            pubkey = coincurve.PublicKey.from_signature_and_message(
-                sig_der + bytes([recovery_flag]),
-                msg_hash,
-                hasher=None  # já fizemos o hash manualmente
-            )
-            return pubkey.format(compressed=True).hex()
-        except Exception as e:
-            logger.debug(f"coincurve recovery falhou: {e}")
-            return ""
+        return ""
 
     except Exception as e:
         logger.debug(f"decode_bolt11_pubkey error: {e}")
         return ""
+
+
+def decode_bolt11_payment_hash(bolt11: str) -> str:
+    """
+    Extrai o payment_hash (tag 'p', tag=1) do bolt11 localmente, sem depender
+    de resposta do LNbits. Usado em pay_invoice() para conferir, quando o envio
+    falha por erro de conexão/resposta, se o pagamento já saiu antes de decidir
+    entre reenviar ou marcar o claim como falho — evita pagar duas vezes.
+
+    Retorna hex do hash (64 chars) ou '' se falhar.
+    """
+    try:
+        hrp, data5 = _bolt11_bech32_decode(bolt11.lower())
+        if not hrp or not data5 or len(data5) < 110:
+            return ""
+        i = 7  # pular timestamp (7 grupos de 5-bit)
+        while i < len(data5) - 104:
+            if i + 2 >= len(data5) - 104:
+                break
+            tag = data5[i]
+            dlen = (data5[i+1] << 5) | data5[i+2]
+            i += 3
+            if i + dlen > len(data5) - 104:
+                break
+            if tag == 1 and dlen == 52:  # 'p' = payment_hash
+                hbytes = _bolt11_convertbits(data5[i:i+dlen], 5, 8, False)
+                if hbytes and len(hbytes) >= 32:
+                    return bytes(hbytes[:32]).hex()
+            i += dlen
+        return ""
+    except Exception as e:
+        logger.debug(f"decode_bolt11_payment_hash error: {e}")
+        return ""
+
+
+def decode_bolt11_amount_msat(bolt11: str) -> Optional[int]:
+    """
+    Extrai o valor (em millisatoshis) codificado no HRP do bolt11
+    (ex: "lnbc21n1..." = 21 * 10^-9 BTC = 21000 msat).
+
+    Retorna None se o invoice for "amountless" (sem valor fixo) ou se
+    a decodificação falhar — nesses casos o chamador deve tratar como
+    valor não verificável, nunca assumir que está correto.
+    """
+    try:
+        bech = bolt11.lower()
+        pos = bech.rfind('1')
+        if pos < 1:
+            return None
+        hrp = bech[:pos]
+        m = re.match(r'^ln[a-z]+(\d+)([munp]?)$', hrp)
+        if not m:
+            return None
+        digits, mult = m.group(1), m.group(2)
+        multiplier = {"": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12}[mult]
+        msat = int(digits) * multiplier * 100_000_000_000  # 1 BTC = 1e11 msat
+        return int(round(msat))
+    except Exception as e:
+        logger.debug(f"decode_bolt11_amount_msat error: {e}")
+        return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -300,7 +364,7 @@ BANNER_TOKEN_MAX_AGE = 900  # 15 minutos
 
 
 def verify_pow(seed: str, nonce: int, difficulty: int = 4) -> bool:
-    if not seed or nonce is None or nonce < 0 or nonce > 10_000_000:
+    if not seed or nonce is None or nonce < 0 or nonce > 50_000_000:
         return False
     return hashlib.sha256(f"{seed}:{nonce}".encode()).hexdigest().startswith("0" * difficulty)
 
@@ -311,7 +375,13 @@ def verify_pow(seed: str, nonce: int, difficulty: int = 4) -> bool:
 # (chave = BANNER_SECRET), com timestamp embutido, e o consome apenas uma vez.
 import secrets as _secrets
 
-POW_DIFFICULTY  = 4
+# [FIX] difficulty=4 exigia só ~65k hashes SHA-256 em média — resolvido em
+# milissegundos e trivialmente paralelizável por um farm. difficulty=5 exige
+# ~1M hashes (ainda <1s no navegador de um usuário real, mas 16x mais caro
+# pra quem tenta automatizar em escala). O frontend já lê "difficulty" da
+# resposta do servidor (static/index.html: runPoW(d.seed, d.difficulty)),
+# então não precisa de nenhuma mudança no cliente.
+POW_DIFFICULTY  = 5
 POW_MAX_AGE     = 900   # seed vale por 15 min
 POW_CLOCK_SKEW  = 60    # tolerância de relógio
 _used_pow_seeds: dict[str, float] = {}  # seed -> instante em que pode ser esquecido
@@ -581,8 +651,8 @@ def check_subnet_farm(ip: str, ln_address: str) -> bool:
 
         return len(other_lns) >= 2
     except Exception as e:
-        logger.error(f"check_subnet_farm error: {e}")
-        return False
+        logger.error(f"check_subnet_farm error: {e} — falhando fechado (tratando como farm)")
+        return True
 
 
 def check_fp_farm(fp: str, ln_address: str) -> bool:
@@ -604,8 +674,8 @@ def check_fp_farm(fp: str, ln_address: str) -> bool:
             """, (fp, ln_address.lower())).fetchone()
         return (row["unique_lns"] or 0) >= 1
     except Exception as e:
-        logger.error(f"check_fp_farm error: {e}")
-        return False
+        logger.error(f"check_fp_farm error: {e} — falhando fechado (tratando como farm)")
+        return True
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -712,6 +782,20 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_prefix  ON claims(ip_prefix)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fp_hash    ON claims(fp_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ja3_hash   ON claims(ja3_hash)")
+        # [FIX] Segunda camada contra double-claim, independente do lock em memória
+        # (que só protege enquanto o serviço roda com 1 worker). Índice parcial: não
+        # cobre claims 'paid' anteriores a esta correção porque endereços admin/
+        # whitelist já têm múltiplos claims pagos no mesmo dia no histórico (isentos
+        # de cooldown por design) — cobrir tudo faria a criação do índice falhar.
+        # Protege tudo a partir de 2026-08-16 em diante.
+        try:
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_paid_per_day
+                ON claims(ln_address, date(claimed_at))
+                WHERE status='paid' AND claimed_at >= '2026-08-16T00:00:00'
+            """)
+        except Exception as e:
+            logger.error(f"Não foi possível criar idx_unique_paid_per_day: {e}")
         # Tabela de bloqueios dinâmicos
         conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_entities (
@@ -843,12 +927,14 @@ async def lifespan(app: FastAPI):
     tg_task = asyncio.create_task(run_monitor(interval_hours=1))
     cmd_task = asyncio.create_task(poll_commands())  # Bot de comandos
     orphan_task = asyncio.create_task(run_orphan_check(interval_seconds=300))
+    farm_task = asyncio.create_task(run_farm_check(interval_seconds=900))
     logger.info("BTCFaucet iniciado ✓")
     yield
     task.cancel()
     tg_task.cancel()
     cmd_task.cancel()
     orphan_task.cancel()
+    farm_task.cancel()
     await app.state.http_client.aclose()
     logger.info("BTCFaucet encerrado")
 
@@ -1046,7 +1132,23 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
             data2 = r2.json()
             if data2.get("status") == "ERROR":
                 raise HTTPException(400, data2.get("reason", "Erro ao gerar invoice"))
-            return data2["pr"], wallet_hash
+            bolt11 = data2["pr"]
+            # [FIX] Conferir que o invoice devolvido pelo callback tem exatamente
+            # o valor pedido — sem isso, um LNURLp malicioso pode ignorar o
+            # parâmetro "amount" e devolver um invoice de qualquer valor, e o
+            # faucet pagaria cegamente o que o bolt11 pede.
+            invoice_msat = decode_bolt11_amount_msat(bolt11)
+            expected_msat = amount_sat * 1000
+            if invoice_msat is None:
+                logger.error(f"resolve_ln_address [{address}]: invoice sem valor decodificável, recusando")
+                raise HTTPException(400, "Invoice retornado pela wallet não pôde ser validado.")
+            if invoice_msat != expected_msat:
+                logger.error(
+                    f"resolve_ln_address [{address}]: valor do invoice ({invoice_msat} msat) "
+                    f"diferente do pedido ({expected_msat} msat) — recusando pagamento"
+                )
+                raise HTTPException(400, "Valor do invoice não corresponde ao solicitado.")
+            return bolt11, wallet_hash
         finally:
             if _owns_client:
                 await client.aclose()
@@ -1076,6 +1178,63 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
     """
     headers = {"X-Api-Key": LNBITS_ADMIN_KEY, "Content-Type": "application/json"}
 
+    # payment_hash já é conhecido de antemão (vem do próprio bolt11) — permite
+    # checar no LNbits se um envio anterior já saiu, mesmo sem termos recebido
+    # a resposta dele, antes de decidir reenviar (evita pagar duas vezes).
+    expected_hash = decode_bolt11_payment_hash(bolt11)
+    if not expected_hash:
+        logger.warning("pay_invoice: não foi possível decodificar payment_hash do bolt11 — sem checagem de duplo-pagamento em caso de falha de envio")
+
+    async def _already_paid() -> Optional[dict]:
+        """Consulta o LNbits pelo payment_hash conhecido. None = não pago/não
+        encontrado (seguro reenviar). Levanta se a própria checagem falhar
+        (status indeterminado — não é seguro nem reenviar nem declarar failed)."""
+        if not expected_hash:
+            return None
+        async with httpx.AsyncClient(timeout=15) as pc:
+            pr = await pc.get(f"{LNBITS_URL}/api/v1/payments/{expected_hash}", headers=headers)
+        pd = pr.json()
+        if pd.get("preimage") and pd.get("paid"):
+            await _alert_if_fee_high(pd)
+            return {"payment_hash": expected_hash, "payment_preimage": pd["preimage"]}
+        return None
+
+    async def _resolve_uncertain_send() -> Optional[dict]:
+        try:
+            return await _already_paid()
+        except Exception as ce:
+            logger.error(f"pay_invoice: checagem pós-falha de envio também falhou: {ce}")
+            raise PaymentInitiatedError(expected_hash)
+
+    # [FIX] A API do LNbits (core, /api/v1/payments) não aceita nenhum parâmetro
+    # de limite de taxa de roteamento na requisição — confirmado no openapi.json
+    # do provedor (schema CreateInvoice não tem campo de fee limit). Não dá pra
+    # impedir uma taxa alta de antemão por aqui; o que dá pra fazer é alertar
+    # depois que o pagamento sai, usando PHOENIX_MAX_FEE_SAT como limiar.
+    def _fee_msat_from(payload: dict) -> Optional[int]:
+        if not payload:
+            return None
+        if "fee" in payload:
+            return payload.get("fee")
+        details = payload.get("details")
+        if isinstance(details, dict):
+            return details.get("fee")
+        return None
+
+    async def _alert_if_fee_high(raw_payload: dict) -> None:
+        fee_msat = _fee_msat_from(raw_payload)
+        if fee_msat is None:
+            return
+        fee_sat = abs(fee_msat) / 1000
+        if fee_sat > PHOENIX_MAX_FEE_SAT:
+            logger.warning(f"pay_invoice: taxa de roteamento alta — {fee_sat:.1f} sats (limiar: {PHOENIX_MAX_FEE_SAT})")
+            asyncio.create_task(send_alert(
+                f"⚠️ <b>Taxa de roteamento acima do esperado</b>\n"
+                f"Taxa: {fee_sat:.1f} sats (limiar configurado: {PHOENIX_MAX_FEE_SAT} sats)\n"
+                f"O pagamento já foi enviado — o LNbits não permite limitar a taxa "
+                f"por requisição nesta API, isto é só um alerta."
+            ))
+
     last_payment_hash: str = ""
     definitively_failed = False
 
@@ -1090,6 +1249,10 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
                 )
         except Exception as e:
             logger.error(f"pay_invoice LNbits conexão falhou (tentativa {attempt+1}/3): {e}")
+            already = await _resolve_uncertain_send()
+            if already:
+                logger.info("Pagamento confirmado via checagem pós-falha de conexão")
+                return already
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             continue
@@ -1103,6 +1266,10 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
                 detail = ""
             if "rejected" in detail or "recipient" in detail:
                 raise HTTPException(400, "Sua wallet recusou o pagamento. Algumas wallets têm valor mínimo maior. Tente outra wallet Lightning.")
+            already = await _resolve_uncertain_send()
+            if already:
+                logger.info("Pagamento confirmado via checagem pós-resposta de erro do LNbits")
+                return already
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             continue
@@ -1112,11 +1279,19 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
 
         if data.get("status") == "success" and data.get("preimage"):
             logger.info(f"Pagamento confirmado imediatamente (tentativa {attempt+1})")
+            await _alert_if_fee_high(data)
             return {"payment_hash": payment_hash, "payment_preimage": data["preimage"]}
 
         if payment_hash:
             last_payment_hash = payment_hash
             break  # hash obtido — não reenvia o POST, só faz polling
+
+        if expected_hash:
+            # Resposta 200 sem payment_hash no corpo — usa o hash decodificado
+            # do próprio bolt11 pra fazer polling, em vez de reenviar o POST.
+            logger.warning(f"pay_invoice tentativa {attempt+1}/3: resposta sem payment_hash, usando hash decodificado do bolt11")
+            last_payment_hash = expected_hash
+            break
 
         logger.warning(f"pay_invoice tentativa {attempt+1}/3: sem payment_hash")
         if attempt < 2:
@@ -1137,6 +1312,7 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
             pd = pr.json()
             if pd.get("preimage") and pd.get("paid"):
                 logger.info(f"Pagamento confirmado no poll rápido {poll+1}")
+                await _alert_if_fee_high(pd)
                 return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
             if pd.get("status") == "failed":
                 definitively_failed = True
@@ -1161,6 +1337,7 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
             pd = pr.json()
             if pd.get("preimage") and pd.get("paid"):
                 logger.info(f"Pagamento confirmado no poll lento {slow+1}")
+                await _alert_if_fee_high(pd)
                 return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
             if pd.get("status") == "failed":
                 definitively_failed = True
@@ -1595,6 +1772,38 @@ async def claim(req: ClaimRequest, request: Request):
                         conn.commit()
                     raise HTTPException(403, "Este IP já foi utilizado para receber sats hoje.")
 
+                # Verificar node pubkey de destino ANTES de pagar. decode_bolt11_pubkey
+                # usa recuperação ECDSA da assinatura real do invoice como fonte de
+                # verdade — não confia isoladamente no campo opcional "n", que um
+                # LNURLp malicioso poderia forjar por conta própria.
+                dest_pubkey = decode_bolt11_pubkey(bolt11)
+                if not dest_pubkey:
+                    logger.warning(f"Não foi possível decodificar node pubkey do bolt11 | ln={ln} ip={ip}")
+                elif ln not in config.WHITELIST_ADM and ln not in config.WHITELIST:
+                    if is_node_blocked(dest_pubkey):
+                        logger.warning(f"Node pubkey bloqueado: {ln} | pubkey={dest_pubkey[:16]}… | ip={ip}")
+                        with get_db() as conn:
+                            conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                            conn.commit()
+                        raise HTTPException(403, "Este destino de pagamento está bloqueado.")
+
+                    pk_blocked, pk_original = check_node_fingerprint(dest_pubkey, ln)
+                    if pk_blocked:
+                        logger.warning(
+                            f"Node pubkey reutilizado: {ln} → pubkey já usado por {pk_original} "
+                            f"| pubkey={dest_pubkey[:16]}… | ip={ip}"
+                        )
+                        asyncio.create_task(send_alert(
+                            f"🚨 <b>Fraude detectada — node pubkey reutilizado</b>\n"
+                            f"<b>Bloqueado:</b> <code>{ln}</code>\n"
+                            f"<b>Já usado por:</b> <code>{pk_original}</code>\n"
+                            f"<b>IP:</b> <code>{ip}</code>"
+                        ))
+                        with get_db() as conn:
+                            conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
+                            conn.commit()
+                        raise HTTPException(403, "Este node Lightning já foi utilizado com outro endereço. Acesso negado.")
+
         except HTTPException:
             with get_db() as conn:
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
@@ -1605,7 +1814,6 @@ async def claim(req: ClaimRequest, request: Request):
         try:
             result = await pay_invoice(bolt11, http_client=http)
             payment_hash = result.get("payment_hash", "")
-            dest_pubkey = decode_bolt11_pubkey(bolt11)
 
             # Persistir status='paid' com retry — se falhar, o registro fica com
             # payment_hash preenchido e cleanup_stale_pending o marca 'orphan'
@@ -1643,14 +1851,9 @@ async def claim(req: ClaimRequest, request: Request):
 
             # Registrar wallet_hash só após pagamento confirmado
             register_wallet_fingerprint(wallet_hash, ln)
+            # dest_pubkey já foi checado (is_node_blocked/check_node_fingerprint)
+            # antes do pagamento, mais acima — aqui só persiste no registro.
 
-            if dest_pubkey:
-                pk_blocked, pk_original = check_node_fingerprint(dest_pubkey, ln)
-                if pk_blocked:
-                    logger.warning(
-                        f"Node pubkey reutilizado: {ln} → pubkey já usado por {pk_original} "
-                        f"| pubkey={dest_pubkey[:16]}…"
-                    )
             logger.info(f"Claim OK: {ln} | ip={ip} | hash={payment_hash[:16]}...")
             if fp_penalty:
                 success_msg = (
@@ -1800,15 +2003,55 @@ async def claim_fallback(body: dict, request: Request):
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 bolt11, wallet_hash = await resolve_ln_address(alt_ln, reward_amount, http_client=http)
+
+                # Mesma checagem de node pubkey do fluxo principal, ANTES de pagar.
+                dest_pubkey = decode_bolt11_pubkey(bolt11)
+                if not dest_pubkey:
+                    logger.warning(f"Fallback: não foi possível decodificar node pubkey | alt_ln={alt_ln}")
+                elif alt_ln not in config.WHITELIST_ADM and alt_ln not in config.WHITELIST:
+                    if is_node_blocked(dest_pubkey):
+                        logger.warning(f"Fallback: node pubkey bloqueado | alt_ln={alt_ln} pubkey={dest_pubkey[:16]}…")
+                        raise HTTPException(403, "Este destino de pagamento está bloqueado.")
+                    pk_blocked, pk_original = check_node_fingerprint(dest_pubkey, alt_ln)
+                    if pk_blocked:
+                        logger.warning(
+                            f"Fallback: node pubkey reutilizado | alt_ln={alt_ln} original={pk_original}"
+                        )
+                        asyncio.create_task(send_alert(
+                            f"🚨 <b>Fraude detectada — node pubkey reutilizado (fallback)</b>\n"
+                            f"<b>Bloqueado:</b> <code>{alt_ln}</code>\n"
+                            f"<b>Já usado por:</b> <code>{pk_original}</code>"
+                        ))
+                        raise HTTPException(403, "Este node Lightning já foi utilizado com outro endereço. Acesso negado.")
+
                 result = await pay_invoice(bolt11, http_client=http)
                 payment_hash = result.get("payment_hash", "")
-                dest_pubkey = decode_bolt11_pubkey(bolt11)
         except HTTPException:
             # Reverter para 'failed' para permitir nova tentativa de fallback
             with get_db() as conn:
                 conn.execute("UPDATE claims SET status='failed' WHERE id=?", (claim_id,))
                 conn.commit()
             raise
+        except PaymentInitiatedError as e:
+            # Mesmo tratamento do fluxo principal: pagamento pode ter saído,
+            # não é seguro liberar re-claim marcando 'failed'.
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE claims SET status='orphan', payment_hash=? WHERE id=?",
+                    (e.payment_hash, claim_id)
+                )
+                conn.commit()
+            logger.critical(
+                f"ORPHAN (fallback): pagamento enviado mas não confirmado! "
+                f"claim_id={claim_id} alt_ln={alt_ln} hash={e.payment_hash}"
+            )
+            asyncio.create_task(send_alert(
+                f"⚠️ <b>Claim orphan (fallback) — pagamento incerto</b>\n"
+                f"<b>LN:</b> <code>{alt_ln}</code>\n"
+                f"<b>Hash:</b> <code>{e.payment_hash}</code>\n"
+                f"Revisar manualmente se sats foram enviados."
+            ))
+            raise HTTPException(503, "Não foi possível confirmar o pagamento. Por segurança, aguarde alguns minutos antes de tentar novamente.")
         except Exception as e:
             logger.error(f"claim_fallback error: {e}")
             with get_db() as conn:
