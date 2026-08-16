@@ -561,6 +561,7 @@ let _isSuspectDomain = false;
 let _challengeRound  = 1;
 let _currentPhrase2  = '';
 let _wosClaimId      = null;
+let _wosFallbackToken = null;
 
 async function checkSuspectDomain(ln) {
   try {
@@ -649,6 +650,7 @@ function resetSteps() {
   const fb = document.getElementById('wos-fallback');
   if (fb) fb.style.display = 'none';
   _wosClaimId = null;
+  _wosFallbackToken = null;
 }
 
 
@@ -1136,6 +1138,7 @@ async function doClaim() {
       } else if (r.status === 503) {
         if (d.detail === 'wos_routing_error') {
           _wosClaimId = d.claim_id || null;
+          _wosFallbackToken = d.fallback_token || null;
           const fb = document.getElementById('wos-fallback');
           document.getElementById('wos-fallback-msg').textContent = L.wos_fallback_msg;
           document.getElementById('wos-fallback-hint').textContent = L.wos_fallback_hint;
@@ -1346,7 +1349,7 @@ async function doFallbackClaim() {
     const r = await fetch(`${API}/api/claim/fallback`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({claim_id: _wosClaimId, alternative_ln_address: altLn})
+      body: JSON.stringify({claim_id: _wosClaimId, alternative_ln_address: altLn, fallback_token: _wosFallbackToken})
     });
     const d = await r.json();
 

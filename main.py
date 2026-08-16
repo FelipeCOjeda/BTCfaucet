@@ -391,6 +391,16 @@ def _pow_sign(seed: str) -> str:
     return hmac.new(BANNER_SECRET.encode(), seed.encode(), hashlib.sha256).hexdigest()
 
 
+def _fallback_sign(claim_id: int) -> str:
+    """Assina o claim_id emitido no erro wos_routing_error, mesmo padrão do
+    PoW (HMAC com BANNER_SECRET). [FIX] Sem isso, claim_id é só um inteiro
+    sequencial — sob CGNAT (IP compartilhado por vários usuários móveis),
+    qualquer um no mesmo IP dentro da janela de 15min podia adivinhar um
+    claim_id alheio e sequestrar o fallback pro próprio endereço, pulando
+    hCaptcha e PoW inteiramente."""
+    return hmac.new(BANNER_SECRET.encode(), f"fallback:{claim_id}".encode(), hashlib.sha256).hexdigest()
+
+
 def issue_pow_challenge() -> dict:
     ts = int(_time.time())
     seed = f"{ts}.{_secrets.token_hex(12)}"
@@ -1416,6 +1426,68 @@ async def api_stats(request: Request):
     
     return stats
 
+async def evaluate_cooldown_block(
+    ln: str, ip: str, fp: Optional[str], ja3: str, *, check_ja3_even_if_whitelisted: bool
+) -> Optional[dict]:
+    """
+    [FIX] Bateria de cooldowns compartilhada por /api/check e /api/claim —
+    antes duplicada quase byte-a-byte nos dois endpoints, com risco real de
+    uma correção ser aplicada num lugar e esquecida no outro. Chamador é
+    responsável por só invocar quando `ln not in config.WHITELIST_ADM`
+    (WHITELIST_ADM ignora cooldowns inteiramente nos dois endpoints).
+
+    Levanta HTTPException(403) diretamente pro caso fp_too_new — idêntico
+    nos dois chamadores (mesmo texto, mesmo status). Pros demais bloqueios
+    (address/ip/subnet/fingerprint/tls) retorna
+    {"reason", "wait_seconds", "message"} e deixa o chamador decidir o
+    formato de resposta: /api/check devolve 200 com blocked=True, /api/claim
+    levanta HTTPException(429). Retorna None se nada bloquear.
+
+    check_ja3_even_if_whitelisted: única divergência de comportamento real
+    encontrada entre os dois blocos originais — /api/claim checava
+    is_ja3_blocked mesmo para LN address em WHITELIST (só WHITELIST_ADM
+    pulava), enquanto /api/check pulava pra WHITELIST também. Preservada
+    aqui explicitamente via parâmetro, não escondida/unificada — mudar isso
+    seria uma decisão de segurança, não só uma limpeza de código.
+
+    NÃO cobre is_dynamically_blocked/is_bot_ua/is_blocked_ipv6_pattern/
+    is_blocked_asn_hextet: esses já tinham gates de whitelist diferentes
+    entre os dois endpoints antes desta mudança (ex: is_blocked_asn_hextet
+    só é chamado em /api/check) — permanecem como estavam, não unificados.
+    """
+    blocked, secs = is_address_blocked(ln)
+    if blocked:
+        return {"reason": "address", "wait_seconds": secs,
+                "message": "Você já recebeu sats hoje. Volte amanhã após a meia-noite (00:00 UTC)."}
+
+    ip_blocked, ip_secs = is_ip_blocked(ip)
+    if ip_blocked:
+        m2 = ip_secs // 60
+        return {"reason": "ip", "wait_seconds": ip_secs,
+                "message": f"Este IP já recebeu sats recentemente. Aguarde {m2} minutos."}
+
+    subnet_blocked, _ = is_subnet_blocked(ip)
+    if subnet_blocked:
+        return {"reason": "subnet", "wait_seconds": 86400,
+                "message": "Muitas requisições desta rede. Tente mais tarde."}
+
+    fp_blocked, fp_secs = is_fp_blocked(fp)
+    if fp_blocked:
+        return {"reason": "fingerprint", "wait_seconds": fp_secs,
+                "message": "Limite de claims deste dispositivo atingido hoje. Volte após a meia-noite (00:00 UTC)."}
+
+    if ln not in config.WHITELIST and is_fp_too_new(fp, ip, ln):
+        raise HTTPException(403, "Seu navegador está limpando os cookies. Por segurança, o sistema bloqueou o acesso. Tente novamente por outro navegador ou desative a limpeza automática de cookies e tente novamente após 10 minutos.")
+
+    if check_ja3_even_if_whitelisted or ln not in config.WHITELIST:
+        ja3_blocked, ja3_secs = is_ja3_blocked(ja3)
+        if ja3_blocked:
+            return {"reason": "tls", "wait_seconds": ja3_secs,
+                    "message": "Limite de claims deste endereço atingido hoje. Volte após a meia-noite (00:00 UTC)."}
+
+    return None
+
+
 @app.post("/api/check")
 async def check_address(body: dict, request: Request):
     ip = get_client_ip(request)
@@ -1455,41 +1527,11 @@ async def check_address(body: dict, request: Request):
     # WHITELIST_ADM: ignora tudo (cooldowns + bloqueios)
     # WHITELIST:     ignora bloqueios mas respeita cooldowns
     if ln not in config.WHITELIST_ADM:
-        # Cooldowns — WHITELIST_ADM ignora, todos os outros respeitam
-        blocked, secs = is_address_blocked(ln)
-        if blocked:
-            return {"blocked": True, "wait_seconds": secs, "reason": "address",
-                    "message": "Você já recebeu sats hoje. Volte amanhã após a meia-noite (00:00 UTC)."}
-
-        ip_blocked, ip_secs = is_ip_blocked(ip)
-        if ip_blocked:
-            m2 = ip_secs // 60
-            return {"blocked": True, "wait_seconds": ip_secs, "reason": "ip",
-                    "message": f"Este IP já recebeu sats recentemente. Aguarde {m2} minutos."}
-
-        subnet_blocked, _ = is_subnet_blocked(ip)
-        if subnet_blocked:
-            return {"blocked": True, "wait_seconds": 86400, "reason": "subnet",
-                    "message": "Muitas requisições desta rede. Tente mais tarde."}
-
-        fp_blocked, fp_secs = is_fp_blocked(fp)
-        if fp_blocked:
-            h2, m2 = fp_secs // 3600, (fp_secs % 3600) // 60
-            return {"blocked": True, "wait_seconds": fp_secs, "reason": "fingerprint",
-                    "message": "Limite de claims deste dispositivo atingido hoje. Volte após a meia-noite (00:00 UTC)."}
-        
-        # Bloqueios de segurança — WHITELIST ignora
-        if ln not in config.WHITELIST:
-            if is_fp_too_new(fp, ip, ln):
-                raise HTTPException(403, "Seu navegador está limpando os cookies. Por segurança, o sistema bloqueou o acesso. Tente novamente por outro navegador ou desative a limpeza automática de cookies e tente novamente após 10 minutos.")
-
-            ja3 = get_ja3(request)
-            asn = get_cf_asn(request)
-            ja3_blocked, ja3_secs = is_ja3_blocked(ja3)
-            if ja3_blocked:
-                h3, m3 = ja3_secs // 3600, (ja3_secs % 3600) // 60
-                return {"blocked": True, "wait_seconds": ja3_secs, "reason": "tls",
-                        "message": "Limite de claims deste endereço atingido hoje. Volte após a meia-noite (00:00 UTC)."}
+        block = await evaluate_cooldown_block(
+            ln, ip, fp, get_ja3(request), check_ja3_even_if_whitelisted=False
+        )
+        if block:
+            return {"blocked": True, **block}
 
     return {"blocked": False}
 
@@ -1580,34 +1622,11 @@ async def claim(req: ClaimRequest, request: Request):
     # 3 – Rate limits (pós-captcha)
     # WHITELIST_ADM: ignora tudo | WHITELIST: respeita cooldowns | normal: respeita tudo
     if ln not in config.WHITELIST_ADM:
-        blocked, secs = is_address_blocked(ln)
-        if blocked:
-            raise HTTPException(429, "Você já recebeu sats hoje. Volte amanhã após a meia-noite (00:00 UTC).")
-
-        ip_blocked, ip_secs = is_ip_blocked(ip)
-        if ip_blocked:
-            m2 = ip_secs // 60
-            raise HTTPException(429, f"Este IP já recebeu sats recentemente. Aguarde {m2} minutos.")
-
-        subnet_blocked, _ = is_subnet_blocked(ip)
-        if subnet_blocked:
-            raise HTTPException(429, "Muitas requisições desta rede. Tente mais tarde.")
-
-        fp_blocked, fp_secs = is_fp_blocked(fp)
-        if fp_blocked:
-            h2, m2 = fp_secs // 3600, (fp_secs % 3600) // 60
-            raise HTTPException(429, "Limite de claims deste dispositivo atingido hoje. Volte após a meia-noite (00:00 UTC).")
-        
-        # FP age check - bloqueia fingerprints muito novos (< FP_MIN_AGE_MINUTES)
-        # CRÍTICO: Verificar ANTES do INSERT para evitar poluir DB com farms
-        if ln not in config.WHITELIST and ln not in config.WHITELIST_ADM and is_fp_too_new(fp, ip, ln):
-            logger.warning(f"FP muito novo bloqueado em /api/claim: fp={fp[:12] if fp else 'None'}… ip={ip} ln={ln}")
-            raise HTTPException(403, "Seu navegador está limpando os cookies. Por segurança, o sistema bloqueou o acesso. Tente novamente por outro navegador ou desative a limpeza automática de cookies e tente novamente após 10 minutos.")
-
-        ja3_blocked, ja3_secs = is_ja3_blocked(ja3)
-        if ja3_blocked:
-            h3, m3 = ja3_secs // 3600, (ja3_secs % 3600) // 60
-            raise HTTPException(429, "Limite de claims deste endereço atingido hoje. Volte após a meia-noite (00:00 UTC).")
+        block = await evaluate_cooldown_block(
+            ln, ip, fp, ja3, check_ja3_even_if_whitelisted=True
+        )
+        if block:
+            raise HTTPException(429, block["message"])
 
     # 4 – [FIX #1] Lock exclusivo por LN address — previne race condition / duplo gasto
     acquired = await acquire_claim_lock(ln)
@@ -1900,7 +1919,12 @@ async def claim(req: ClaimRequest, request: Request):
                 if domain in {"walletofsatoshi.com", "livingroomofsatoshi.com"}:
                     return JSONResponse(
                         status_code=503,
-                        content={"detail": "wos_routing_error", "claim_id": claim_id, "amount_sat": reward_amount}
+                        content={
+                            "detail": "wos_routing_error",
+                            "claim_id": claim_id,
+                            "amount_sat": reward_amount,
+                            "fallback_token": _fallback_sign(claim_id),
+                        }
                     )
             raise
         except BaseException as e:
@@ -1936,9 +1960,17 @@ async def claim_fallback(body: dict, request: Request):
 
     claim_id = body.get("claim_id")
     alt_ln = (body.get("alternative_ln_address") or "").strip().lower()
+    fallback_token = body.get("fallback_token") or ""
 
     if not claim_id or not alt_ln:
         raise HTTPException(400, "Dados incompletos.")
+
+    # [FIX] Exige o token assinado emitido junto com o claim_id no erro
+    # wos_routing_error — sem isso, claim_id sequencial + IP (fraco sob
+    # CGNAT) era a única barreira, permitindo sequestrar o fallback de
+    # outro usuário no mesmo IP compartilhado.
+    if not fallback_token or not hmac.compare_digest(_fallback_sign(claim_id), fallback_token):
+        raise HTTPException(403, "Token de fallback inválido ou ausente.")
 
     # Validar endereço alternativo
     if "@" not in alt_ln:
