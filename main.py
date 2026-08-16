@@ -120,6 +120,22 @@ def is_dynamically_blocked(ip: str, fp: Optional[str], ln: str) -> bool:
             ).fetchone()
             if row:
                 return True
+            # [FIX] Bloqueio manual agora aceita CIDR ("1.2.3.0/24") além de
+            # IP exato — sem isto, uma faixa bloqueada nunca batia aqui,
+            # porque a checagem só fazia match exato de string.
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                cidrs = conn.execute(
+                    "SELECT entity_value FROM blocked_entities WHERE entity_type='ip' AND entity_value LIKE '%/%'"
+                ).fetchall()
+                for row in cidrs:
+                    try:
+                        if ip_obj in ipaddress.ip_network(row["entity_value"], strict=False):
+                            return True
+                    except ValueError:
+                        continue
+            except ValueError:
+                pass
         if fp:
             row = conn.execute(
                 "SELECT 1 FROM blocked_entities WHERE entity_type='fp' AND entity_value=? LIMIT 1",
@@ -1071,6 +1087,18 @@ class ClaimRequest(BaseModel):
     pow_seed:         Optional[str] = None
     pow_sig:          Optional[str] = None
 
+class CheckSuspectRequest(BaseModel):
+    ln_address: str = ""
+
+class CheckAddressRequest(BaseModel):
+    ln_address: str = ""
+    fp_hash:    Optional[str] = None
+
+class ClaimFallbackRequest(BaseModel):
+    claim_id:               int
+    alternative_ln_address: str = ""
+    fallback_token:         str = ""
+
 async def verify_hcaptcha(token: str) -> bool:
     try:
         async with httpx.AsyncClient() as client:
@@ -1406,9 +1434,9 @@ async def api_pow_challenge(request: Request):
     return issue_pow_challenge()
 
 @app.post("/api/check-suspect")
-async def check_suspect(body: dict, request: Request):
+async def check_suspect(body: CheckSuspectRequest, request: Request):
     """Retorna se LN address pertence a domínio suspeito (dose dupla)."""
-    ln = (body.get("ln_address") or "").strip().lower()
+    ln = body.ln_address.strip().lower()
     if "@" not in ln:
         return {"suspect": False}
     domain = ln.split("@")[1]
@@ -1509,13 +1537,13 @@ async def evaluate_cooldown_block(
 
 
 @app.post("/api/check")
-async def check_address(body: dict, request: Request):
+async def check_address(body: CheckAddressRequest, request: Request):
     ip = get_client_ip(request)
     if not await check_rate_limit(ip, max_req=20, window=60):
         raise HTTPException(429, "Muitas requisições.")
 
-    ln = body.get("ln_address", "").strip().lower()
-    fp = sanitize_fp_hash(body.get("fp_hash"))
+    ln = body.ln_address.strip().lower()
+    fp = sanitize_fp_hash(body.fp_hash)
     asn = get_cf_asn(request)
 
     if not ln:
@@ -1974,7 +2002,7 @@ async def claim(req: ClaimRequest, request: Request):
 WOS_DOMAINS = {"walletofsatoshi.com", "livingroomofsatoshi.com"}
 
 @app.post("/api/claim/fallback")
-async def claim_fallback(body: dict, request: Request):
+async def claim_fallback(body: ClaimFallbackRequest, request: Request):
     """
     Reencaminha um pagamento WoS falhado para uma wallet alternativa.
     Requer claim_id de uma tentativa WoS falha nos últimos 15 minutos.
@@ -1983,9 +2011,9 @@ async def claim_fallback(body: dict, request: Request):
     if not await check_rate_limit(ip, max_req=5, window=300):
         raise HTTPException(429, "Muitas tentativas. Aguarde alguns minutos.")
 
-    claim_id = body.get("claim_id")
-    alt_ln = (body.get("alternative_ln_address") or "").strip().lower()
-    fallback_token = body.get("fallback_token") or ""
+    claim_id = body.claim_id
+    alt_ln = body.alternative_ln_address.strip().lower()
+    fallback_token = body.fallback_token
 
     if not claim_id or not alt_ln:
         raise HTTPException(400, "Dados incompletos.")

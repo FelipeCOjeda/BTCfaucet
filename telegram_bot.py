@@ -4,6 +4,7 @@ Telegram Bot para controle do BTCFaucet
 Comandos de admin, bloqueios, whitelist, restart, etc.
 """
 import asyncio
+import ipaddress
 import logging
 import os
 import re
@@ -28,10 +29,12 @@ from config import (
     WHITELIST_ADM,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+# [FIX] logging.basicConfig() NÃO é chamado aqui no nível do módulo — quando
+# importado por main.py (uso normal em produção), é main.py quem configura o
+# root logger; chamar de novo aqui seria um no-op silencioso (comportamento
+# padrão do logging.basicConfig) que dependia da ORDEM dos imports pra não
+# divergir. Só chama quando este arquivo roda standalone (ver bloco
+# `if __name__ == "__main__":` no final do arquivo).
 logger = logging.getLogger("faucet.telegram")
 
 if not TELEGRAM_ENABLED:
@@ -93,8 +96,20 @@ def _block_entity(entity_type: str, value: str, reason: str = "manual") -> Tuple
         if not value:
             return False, "❌ Valor vazio"
 
-        if entity_type == "ip" and not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", value):
-            return False, f"❌ IP inválido: {value}"
+        # [FIX] Antes só aceitava IPv4 exato via regex — rejeitava IPv6
+        # (apesar do faucet ter lógica dedicada pra farms IPv6) e CIDR
+        # (não dava pra bloquear uma faixa inteira de rede sem entrada
+        # exata por exata). Agora aceita IPv4/IPv6, único ou em notação
+        # CIDR ("1.2.3.0/24", "2804:880::/32"). Entrada CIDR é normalizada
+        # e checada em is_dynamically_blocked (main.py) além do match exato.
+        if entity_type == "ip":
+            try:
+                if "/" in value:
+                    value = str(ipaddress.ip_network(value, strict=False))
+                else:
+                    ipaddress.ip_address(value)  # valida, mantém formato original
+            except ValueError:
+                return False, f"❌ IP/CIDR inválido: {value}"
 
         if entity_type == "ln" and "@" not in value:
             return False, f"❌ LN address inválido: {value}"
@@ -1176,4 +1191,8 @@ async def poll_commands():
 # ============================================================================
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
     asyncio.run(poll_commands())
