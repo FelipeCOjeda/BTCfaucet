@@ -30,6 +30,7 @@ from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ENABLED,
     SERVICE_NAME, SUDO_PASS, ALLOWED_ORIGIN,
     PHOENIXD_URL, PHOENIXD_PASSWORD, PHOENIX_MAX_FEE_SAT,
+    BANNER_SECRET,
 )
 
 from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check, run_farm_check
@@ -356,8 +357,8 @@ def get_broad_prefix(ip: str) -> str:
         return ip
 
 # ── Banner / CSS Token ────────────────────────────────────────────────────────
+# BANNER_SECRET agora vem de config.py (validado no boot — ver config.py)
 
-BANNER_SECRET        = os.getenv("BANNER_SECRET", "bitcoinfaucet_secret_key_32chars!")
 BANNER_TOKEN_MIN_AGE = 10
 BANNER_TOKEN_MAX_AGE = 900  # 15 minutos
 
@@ -785,8 +786,13 @@ def init_db():
         ]:
             try:
                 conn.execute(f"ALTER TABLE claims ADD COLUMN {col} {typedef}")
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                # [FIX] Só engole o erro esperado (coluna já existe, de um
+                # boot anterior) — qualquer outro erro (disco cheio, schema
+                # corrompido) sobe e falha o boot, em vez de deixar a coluna
+                # faltando silenciosamente e quebrar em runtime mais tarde.
+                if "duplicate column" not in str(e).lower():
+                    raise
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ln_address ON claims(ln_address)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_address ON claims(ip_address)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_prefix  ON claims(ip_prefix)")
@@ -906,9 +912,23 @@ async def lifespan(app: FastAPI):
                             WHERE status IN ('failed','orphan')
                             AND claimed_at < datetime('now', '-60 days')
                         """).rowcount
+                        # [FIX] IP exato só é operacionalmente necessário dentro
+                        # da janela de cooldown (24h). Depois disso, substitui
+                        # pelo ip_prefix (já armazenado) — mantém a granularidade
+                        # de rede útil pra análise de farm, mas para de reter o
+                        # IP exato do dispositivo indefinidamente em claims pagos.
+                        n_anon = conn.execute("""
+                            UPDATE claims SET ip_address = ip_prefix
+                            WHERE status='paid'
+                            AND ip_address IS NOT NULL AND ip_address != ''
+                            AND ip_address != ip_prefix
+                            AND claimed_at < datetime('now', '-25 hours')
+                        """).rowcount
                         conn.commit()
                     if n:
                         logger.info(f"Cleanup: {n} claim(s) failed/orphan antigos removidos")
+                    if n_anon:
+                        logger.info(f"Cleanup: {n_anon} IP(s) de claims pagos antigos anonimizados (ip_address -> ip_prefix)")
                     app.state.last_archive = _time.time()
                 # Verificar saldo LNvoltz e alertar admin se baixo
                 try:
@@ -1853,7 +1873,12 @@ async def claim(req: ClaimRequest, request: Request):
                     if attempt < 2:
                         await asyncio.sleep(0.3)
             if not db_ok:
-                # Pré-marcar payment_hash para que cleanup não libere double-claim
+                # Pré-marcar payment_hash para que cleanup não libere double-claim.
+                # [FIX] Só loga o erro (não relança) — já estamos no caminho de
+                # degradação graciosa após esgotar os 3 retries do UPDATE
+                # principal, e o pagamento real já saiu; o log CRITICAL abaixo
+                # sempre precisa rodar. Mas o erro específico não pode mais
+                # desaparecer silenciosamente.
                 try:
                     with get_db() as conn:
                         conn.execute(
@@ -1861,8 +1886,8 @@ async def claim(req: ClaimRequest, request: Request):
                             (payment_hash, claim_id)
                         )
                         conn.commit()
-                except Exception:
-                    pass
+                except Exception as pre_mark_err:
+                    logger.error(f"Pré-marcação de payment_hash também falhou para claim {claim_id}: {pre_mark_err}")
                 logger.critical(
                     f"CRITICAL: sats enviados mas status não persistido! "
                     f"claim_id={claim_id} ln={ln} hash={payment_hash}"

@@ -7,8 +7,10 @@ import asyncio
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import time as _time
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -39,9 +41,18 @@ if not TELEGRAM_ENABLED:
 # HELPERS
 # ============================================================================
 
+@contextmanager
 def get_db():
-    """Context manager para conexão SQLite."""
-    import sqlite3
+    """Context manager para conexão SQLite.
+
+    [FIX] Faltava o decorator @contextmanager — sem ele, esta função era um
+    gerador comum, e qualquer "with get_db() as conn:" (padrão usado em todo
+    o resto do arquivo) explodiria com AttributeError em runtime. Como nada
+    aqui chamava get_db() diretamente (todas as 8+ funções abaixo abriam
+    conexão própria com sqlite3.connect cru, duplicado), esse bug nunca foi
+    exercitado — corrigido junto com a migração dessas funções pra usar
+    get_db() de verdade.
+    """
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
@@ -327,41 +338,36 @@ async def _generate_invoice(amount_sats: int = 2000) -> str:
 def _abuse_stats() -> str:
     """Estatísticas de abusos nas últimas 6h (claims com status=failed)."""
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
+        with get_db() as conn:
+            # Total de tentativas bloqueadas nas últimas 6h
+            total = conn.execute("""
+                SELECT COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-6 hours')
+            """).fetchone()["c"] or 0
 
-        # Total de tentativas bloqueadas nas últimas 6h
-        total = conn.execute("""
-            SELECT COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-6 hours')
-        """).fetchone()["c"] or 0
+            # Top 3 IPs abusivos (6h)
+            top_ips = conn.execute("""
+                SELECT ip_address, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-6 hours')
+                AND ip_address IS NOT NULL
+                GROUP BY ip_address ORDER BY c DESC LIMIT 3
+            """).fetchall()
 
-        # Top 3 IPs abusivos (6h)
-        top_ips = conn.execute("""
-            SELECT ip_address, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-6 hours')
-            AND ip_address IS NOT NULL
-            GROUP BY ip_address ORDER BY c DESC LIMIT 3
-        """).fetchall()
+            # Top 3 LN addresses bloqueados (6h)
+            top_lns = conn.execute("""
+                SELECT ln_address, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-6 hours')
+                GROUP BY ln_address ORDER BY c DESC LIMIT 3
+            """).fetchall()
 
-        # Top 3 LN addresses bloqueados (6h)
-        top_lns = conn.execute("""
-            SELECT ln_address, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-6 hours')
-            GROUP BY ln_address ORDER BY c DESC LIMIT 3
-        """).fetchall()
-
-        # Taxa de abuse (failed vs total 6h)
-        total_all = conn.execute("""
-            SELECT COUNT(*) as c FROM claims
-            WHERE datetime(claimed_at) >= datetime('now', '-6 hours')
-        """).fetchone()["c"] or 1
-
-        conn.close()
+            # Taxa de abuse (failed vs total 6h)
+            total_all = conn.execute("""
+                SELECT COUNT(*) as c FROM claims
+                WHERE datetime(claimed_at) >= datetime('now', '-6 hours')
+            """).fetchone()["c"] or 1
 
         rate = (total / total_all * 100) if total_all > 0 else 0
 
@@ -388,18 +394,14 @@ def _abuse_stats() -> str:
 def _recent_claims() -> str:
     """Últimos 10 claims."""
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-
-        query = """
-            SELECT ln_address, amount_sat, claimed_at
-            FROM claims
-            ORDER BY claimed_at DESC
-            LIMIT 10
-        """
-        rows = conn.execute(query).fetchall()
-        conn.close()
+        with get_db() as conn:
+            query = """
+                SELECT ln_address, amount_sat, claimed_at
+                FROM claims
+                ORDER BY claimed_at DESC
+                LIMIT 10
+            """
+            rows = conn.execute(query).fetchall()
 
         if not rows:
             return "📭 Nenhum claim recente"
@@ -420,21 +422,17 @@ def _recent_claims() -> str:
 def _hour_stats() -> str:
     """Stats da última hora."""
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-
-        query = """
-            SELECT
-                COUNT(*) as total,
-                COALESCE(SUM(amount_sat), 0) as sats,
-                COUNT(DISTINCT ip_address) as unique_ips,
-                COUNT(DISTINCT fp_hash) as unique_fps
-            FROM claims
-            WHERE datetime(claimed_at) >= datetime('now', '-1 hour')
-        """
-        row = conn.execute(query).fetchone()
-        conn.close()
+        with get_db() as conn:
+            query = """
+                SELECT
+                    COUNT(*) as total,
+                    COALESCE(SUM(amount_sat), 0) as sats,
+                    COUNT(DISTINCT ip_address) as unique_ips,
+                    COUNT(DISTINCT fp_hash) as unique_fps
+                FROM claims
+                WHERE datetime(claimed_at) >= datetime('now', '-1 hour')
+            """
+            row = conn.execute(query).fetchone()
 
         total = row["total"] or 0
         sats = row["sats"] or 0
@@ -456,55 +454,50 @@ def _hour_stats() -> str:
 def _motivo24() -> str:
     """Bloqueios dinâmicos (claims failed) nas últimas 24h + bloqueios manuais recentes."""
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
+        with get_db() as conn:
+            total = conn.execute("""
+                SELECT COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-24 hours')
+            """).fetchone()["c"] or 0
 
-        total = conn.execute("""
-            SELECT COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-24 hours')
-        """).fetchone()["c"] or 0
+            top_lns = conn.execute("""
+                SELECT ln_address, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-24 hours')
+                GROUP BY ln_address ORDER BY c DESC LIMIT 8
+            """).fetchall()
 
-        top_lns = conn.execute("""
-            SELECT ln_address, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-24 hours')
-            GROUP BY ln_address ORDER BY c DESC LIMIT 8
-        """).fetchall()
+            top_fps = conn.execute("""
+                SELECT fp_hash, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-24 hours')
+                AND fp_hash IS NOT NULL
+                GROUP BY fp_hash ORDER BY c DESC LIMIT 8
+            """).fetchall()
 
-        top_fps = conn.execute("""
-            SELECT fp_hash, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-24 hours')
-            AND fp_hash IS NOT NULL
-            GROUP BY fp_hash ORDER BY c DESC LIMIT 8
-        """).fetchall()
+            top_ja3 = conn.execute("""
+                SELECT ja3_hash, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-24 hours')
+                AND ja3_hash IS NOT NULL
+                GROUP BY ja3_hash ORDER BY c DESC LIMIT 5
+            """).fetchall()
 
-        top_ja3 = conn.execute("""
-            SELECT ja3_hash, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-24 hours')
-            AND ja3_hash IS NOT NULL
-            GROUP BY ja3_hash ORDER BY c DESC LIMIT 5
-        """).fetchall()
+            top_ips = conn.execute("""
+                SELECT ip_address, COUNT(*) as c FROM claims
+                WHERE status = 'failed'
+                AND datetime(claimed_at) >= datetime('now', '-24 hours')
+                AND ip_address IS NOT NULL
+                GROUP BY ip_address ORDER BY c DESC LIMIT 8
+            """).fetchall()
 
-        top_ips = conn.execute("""
-            SELECT ip_address, COUNT(*) as c FROM claims
-            WHERE status = 'failed'
-            AND datetime(claimed_at) >= datetime('now', '-24 hours')
-            AND ip_address IS NOT NULL
-            GROUP BY ip_address ORDER BY c DESC LIMIT 8
-        """).fetchall()
-
-        manual_blocks = conn.execute("""
-            SELECT entity_type, entity_value, reason, blocked_at
-            FROM blocked_entities
-            WHERE datetime(blocked_at) >= datetime('now', '-24 hours')
-            ORDER BY blocked_at DESC
-        """).fetchall()
-
-        conn.close()
+            manual_blocks = conn.execute("""
+                SELECT entity_type, entity_value, reason, blocked_at
+                FROM blocked_entities
+                WHERE datetime(blocked_at) >= datetime('now', '-24 hours')
+                ORDER BY blocked_at DESC
+            """).fetchall()
 
         if total == 0 and not manual_blocks:
             return "✅ <b>Nenhum bloqueio nas últimas 24h</b>"
@@ -604,14 +597,11 @@ async def _consultar_pagamento(payment_hash: str) -> str:
 
     # Busca o claim no banco
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        claim = conn.execute(
-            "SELECT id, ln_address, amount_sat, status, claimed_at, ip_address FROM claims WHERE payment_hash=? LIMIT 1",
-            (payment_hash,)
-        ).fetchone()
-        conn.close()
+        with get_db() as conn:
+            claim = conn.execute(
+                "SELECT id, ln_address, amount_sat, status, claimed_at, ip_address FROM claims WHERE payment_hash=? LIMIT 1",
+                (payment_hash,)
+            ).fetchone()
     except Exception as e:
         return f"❌ Erro ao consultar DB: {e}"
 
@@ -661,22 +651,17 @@ def _confirmar_pagamento(payment_hash: str) -> str:
     if not re.match(r'^[a-f0-9]{64}$', payment_hash):
         return "❌ Hash inválido."
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        claim = conn.execute(
-            "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
-            (payment_hash,)
-        ).fetchone()
-        if not claim:
-            conn.close()
-            return "❌ Claim não encontrado para este hash."
-        if claim["status"] == "paid":
-            conn.close()
-            return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>paid</code>."
-        conn.execute("UPDATE claims SET status='paid' WHERE payment_hash=?", (payment_hash,))
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            claim = conn.execute(
+                "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
+                (payment_hash,)
+            ).fetchone()
+            if not claim:
+                return "❌ Claim não encontrado para este hash."
+            if claim["status"] == "paid":
+                return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>paid</code>."
+            conn.execute("UPDATE claims SET status='paid' WHERE payment_hash=?", (payment_hash,))
+            conn.commit()
         return (
             f"✅ <b>Claim {claim['id']} marcado como paid</b>\n"
             f"LN: <code>{claim['ln_address']}</code>\n"
@@ -693,22 +678,17 @@ def _liberar_claim(payment_hash: str) -> str:
     if not re.match(r'^[a-f0-9]{64}$', payment_hash):
         return "❌ Hash inválido."
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        claim = conn.execute(
-            "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
-            (payment_hash,)
-        ).fetchone()
-        if not claim:
-            conn.close()
-            return "❌ Claim não encontrado para este hash."
-        if claim["status"] == "failed":
-            conn.close()
-            return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>failed</code>."
-        conn.execute("UPDATE claims SET status='failed' WHERE payment_hash=?", (payment_hash,))
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            claim = conn.execute(
+                "SELECT id, ln_address, amount_sat, status FROM claims WHERE payment_hash=? LIMIT 1",
+                (payment_hash,)
+            ).fetchone()
+            if not claim:
+                return "❌ Claim não encontrado para este hash."
+            if claim["status"] == "failed":
+                return f"ℹ️ Claim <code>{claim['id']}</code> já está marcado como <code>failed</code>."
+            conn.execute("UPDATE claims SET status='failed' WHERE payment_hash=?", (payment_hash,))
+            conn.commit()
         return (
             f"🔓 <b>Claim {claim['id']} liberado para re-claim</b>\n"
             f"LN: <code>{claim['ln_address']}</code>\n"
@@ -735,14 +715,11 @@ async def _auto_resolve_orphans() -> None:
     - Status incerto                    -> mantém 'orphan', alerta manual (com cooldown)
     """
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        orphans = conn.execute(
-            "SELECT id, payment_hash, ln_address, amount_sat FROM claims "
-            "WHERE status='orphan' AND payment_hash IS NOT NULL AND payment_hash != ''"
-        ).fetchall()
-        conn.close()
+        with get_db() as conn:
+            orphans = conn.execute(
+                "SELECT id, payment_hash, ln_address, amount_sat FROM claims "
+                "WHERE status='orphan' AND payment_hash IS NOT NULL AND payment_hash != ''"
+            ).fetchall()
     except Exception as e:
         logger.error(f"Auto-resolve orphans: erro ao consultar DB: {e}")
         return
@@ -817,20 +794,17 @@ async def _check_farm_correlation() -> None:
     janela curta — a assinatura de farm já confirmada manualmente no projeto
     (mesmo IP, contas diferentes, minutos ou segundos de diferença)."""
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT ip_address, ln_address
-            FROM claims
-            WHERE status='paid'
-              AND claimed_at >= datetime('now', ?)
-              AND ip_address IS NOT NULL AND ip_address != ''
-            """,
-            (f"-{_FARM_CHECK_WINDOW_MINUTES} minutes",)
-        ).fetchall()
-        conn.close()
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT ip_address, ln_address
+                FROM claims
+                WHERE status='paid'
+                  AND claimed_at >= datetime('now', ?)
+                  AND ip_address IS NOT NULL AND ip_address != ''
+                """,
+                (f"-{_FARM_CHECK_WINDOW_MINUTES} minutes",)
+            ).fetchall()
     except Exception as e:
         logger.error(f"Farm correlation check: erro ao consultar DB: {e}")
         return

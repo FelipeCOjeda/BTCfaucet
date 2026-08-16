@@ -21,6 +21,13 @@ PHOENIX_MAX_FEE_SAT = int(os.getenv("PHOENIX_MAX_FEE_SAT", "20"))
 HCAPTCHA_SECRET = os.getenv("HCAPTCHA_SECRET", "")
 HCAPTCHA_SITEKEY = os.getenv("HCAPTCHA_SITEKEY", "")
 
+# ── Anti-bot (assina PoW + token do /api/claim/fallback) ──────────────────────
+# [FIX] Antes vivia só em main.py com um fallback hardcoded fraco
+# ("bitcoinfaucet_secret_key_32chars!") se a env var estivesse ausente —
+# um redeploy/clone sem .env voltava silenciosamente pra esse segredo
+# público. Agora é obrigatório (ver validação no final deste arquivo).
+BANNER_SECRET = os.getenv("BANNER_SECRET", "")
+
 # ── Faucet Settings ───────────────────────────────────────────────────────────
 FAUCET_AMOUNT_SAT = int(os.getenv("FAUCET_AMOUNT_SAT", "1"))
 COOLDOWN_HOURS = int(os.getenv("COOLDOWN_HOURS", "24"))
@@ -95,3 +102,32 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 # ── Faucet URL ────────────────────────────────────────────────────────────────
 FAUCET_URL = os.getenv("FAUCET_URL", "https://bitcoinfaucet.st")
 SITE_URL = os.getenv("SITE_URL", "https://bitcoinfaucet.st")
+
+# ── Validação fail-fast ────────────────────────────────────────────────────────
+# [FIX] Antes, segredos ausentes (.env incompleto) deixavam o serviço subir
+# "saudável" e só falhar nas primeiras requisições reais (hCaptcha sempre
+# rejeitando, LNbits 401) — foi exatamente o tipo de causa por trás do bug
+# de limite de token do captcha já visto neste projeto. Falha no boot, com
+# mensagem clara, em vez de falhar silenciosamente em produção depois.
+_REQUIRED_SECRETS = {
+    "LNBITS_ADMIN_KEY": LNBITS_ADMIN_KEY,
+    "HCAPTCHA_SECRET": HCAPTCHA_SECRET,
+    "BANNER_SECRET": BANNER_SECRET,
+}
+_missing = [name for name, value in _REQUIRED_SECRETS.items() if not value]
+if _missing:
+    raise RuntimeError(
+        f"Variáveis de ambiente obrigatórias ausentes no .env: {', '.join(_missing)}. "
+        f"Veja .env.example."
+    )
+
+# [FIX] Secret de teste oficial do hCaptcha (sempre aprova qualquer token) —
+# se ficar configurado em produção por engano (cópia de ambiente de staging,
+# etc.), toda a validação de captcha é pulada silenciosamente.
+if HCAPTCHA_SECRET == "0x0000000000000000000000000000000000000000":
+    import logging as _logging
+    _logging.getLogger("faucet").critical(
+        "HCAPTCHA_SECRET está com o valor de TESTE oficial do hCaptcha — "
+        "captcha está sendo aprovado sem verificação real. Se isto não é "
+        "um ambiente de teste, troque HCAPTCHA_SECRET imediatamente."
+    )
