@@ -12,14 +12,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Set
 
 import httpx
+from dotenv import load_dotenv
 
-from config import (
-    FAUCET_URL,
-    TELEGRAM_BOT2_TOKEN,
-    TELEGRAM_BOT2_ENABLED,
-    TELEGRAM_CHAT_ID,
-    DB_PATH
-)
+# Lê o próprio .env diretamente (em vez de importar config.py) porque
+# config.py faz validação fail-fast de segredos do main.py (LNbits,
+# hCaptcha, etc.) que o monitor não usa — isso impediria rodar o monitor
+# sozinho numa máquina sem esses segredos configurados.
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+FAUCET_URL = os.getenv("FAUCET_URL", "https://bitcoinfaucet.st")
+TELEGRAM_BOT2_TOKEN = os.getenv("TELEGRAM_BOT2_TOKEN", "")
+TELEGRAM_BOT2_ENABLED = bool(TELEGRAM_BOT2_TOKEN)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+MONITOR_DB_PATH = os.getenv("MONITOR_DB_PATH", os.getenv("DB_PATH", "faucet.db"))
+HEALTH_URL = os.getenv("HEALTH_URL", "http://127.0.0.1:8420/health")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("faucet.monitor")
 
-HEALTH_URL = "http://127.0.0.1:8420/health"
+DB_PATH = MONITOR_DB_PATH
 CHECK_INTERVAL = 30
 BR_TZ = timezone(timedelta(hours=-3))
 
