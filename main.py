@@ -103,8 +103,20 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 def get_ja3(request: Request) -> str:
-    """Extrai JA3 fingerprint do header Cloudflare (se disponível)."""
-    return request.headers.get("CF-JA3-Hash", "")
+    """Extrai JA3 fingerprint injetado por infra confiável (Cloudflare Worker/Transform Rule).
+
+    IMPORTANTE (2026-09-11): confirmado que NADA na frente hoje injeta/sobrescreve
+    CF-JA3-Hash de forma confiável — não há Cloudflare Worker deployado pra este
+    domínio (zero routes na zona) e Transform Rules não podem tocar em headers com
+    prefixo "cf-" (API recusa remove/set). Ou seja, esse header chega intacto
+    exatamente como o cliente mandou — confiar nele permitia qualquer um forjar/
+    trocar o próprio JA3 a cada request e contornar o bloqueio de blocked_entities
+    (entity_type='ja3'). Desabilitado até existir um Worker real na frente
+    sobrescrevendo esse header antes da origem (ver cloudflare-worker.js — precisa
+    ser corrigido pra nunca repassar o CF-JA3 vindo do próprio cliente, e então
+    deployado com route bitcoinfaucet.st/*).
+    """
+    return ""
 
 def get_fp(request: Request) -> Optional[str]:
     """Extrai fp_hash do header customizado (legado)."""
