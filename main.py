@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import hmac
 import hashlib
@@ -23,9 +24,9 @@ import config
 from config import (
     LNBITS_URL, LNBITS_ADMIN_KEY, HCAPTCHA_SECRET, HCAPTCHA_SITEKEY,
     FAUCET_AMOUNT_SAT, COOLDOWN_HOURS, IP_COOLDOWN_HOURS, FP_COOLDOWN_HOURS,
-    SUBNET_LIMIT, FP_LIMIT, PROGRESSIVE_REWARDS,
+    SUBNET_LIMIT, FP_LIMIT,
     REWARD_TIER_1, REWARD_TIER_2, REWARD_TIER_3,
-    FP_MIN_AGE_MINUTES, FP_BLOCK_STRICT,
+    FP_MIN_AGE_MINUTES,
     DB_PATH, SUSPECT_DOMAINS,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ENABLED,
     SERVICE_NAME, SUDO_PASS, ALLOWED_ORIGIN,
@@ -87,6 +88,34 @@ def is_cgnat_ip(ip: str) -> bool:
         return any(addr in net for net in CGNAT_SUBNETS)
     except ValueError:
         return False
+
+
+async def _assert_public_https_url(url: str) -> None:
+    """Bloqueia SSRF: recusa URLs cujo host resolva pra IP privado/loopback/
+    link-local/reservado/multicast. Resolve via DNS e checa TODOS os IPs
+    retornados — não basta olhar só o hostname, porque um domínio controlado
+    pelo atacante pode apontar (ou ser re-apontado depois via DNS rebinding)
+    pra 127.0.0.1, 169.254.169.254 (metadata cloud), rede interna etc."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise HTTPException(400, "LN Address inválido: URL deve usar HTTPS")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(400, "LN Address inválido")
+    try:
+        infos = await asyncio.get_event_loop().getaddrinfo(host, parsed.port or 443)
+    except OSError:
+        raise HTTPException(400, "LN Address inválido: não foi possível resolver o host")
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            logger.warning(f"SSRF bloqueado: {host} resolveu para IP não-público {ip_str}")
+            raise HTTPException(400, "LN Address inválido: host não permitido")
 
 # ── In-memory rate limiter para endpoints públicos ────────────────────────────
 _rate_store: dict[str, list[float]] = {}
@@ -346,7 +375,22 @@ def decode_bolt11_amount_msat(bolt11: str) -> Optional[int]:
 
 # ── IP helpers ────────────────────────────────────────────────────────────────
 def get_cf_asn(request: Request) -> str:
-    return request.headers.get("CF-IPCountry", "") + ":" + request.headers.get("CF-ray", "")[:8]
+    """ASN real da conexão. O bug original (CF-IPCountry+CF-ray, que nunca bate
+    contra BLOCKED_ASN_HEXTETS) foi confirmado, mas a correção óbvia — ler o
+    header CF-ASN — SÓ é segura se o cloudflare-worker.js estiver de fato
+    deployado com route bitcoinfaucet.st/* injetando request.cf.asn nesse header.
+
+    CONFIRMADO via API Cloudflare (2026-09-14): zero routes na zona
+    bitcoinfaucet.st e nenhum Worker publicado pra esse domínio — exatamente a
+    mesma situação que tornava o CF-JA3-Hash forjável (ver get_ja3() acima) e
+    motivou desabilitá-lo. Ler CF-ASN direto do header hoje aceitaria qualquer
+    valor que o próprio cliente mandasse.
+
+    Mantido desabilitado (retorna vazio, is_blocked_asn_hextet nunca bloqueia)
+    até o Worker ser deployado de verdade. Ver cloudflare-worker.js:107-109
+    (já injeta CF-ASN corretamente — falta só a rota bitcoinfaucet.st/* em
+    Workers & Pages → Triggers)."""
+    return ""
 
 def get_ipv6_hextet(ip: str) -> str:
     try:
@@ -571,7 +615,7 @@ def is_fp_too_new(fp_hash: Optional[str], ip: str, ln: str) -> bool:
             "SELECT MIN(claimed_at) FROM claims WHERE fp_hash=?", (fp_hash,)
         ).fetchone()[0]
     if not first_seen:
-        if FP_BLOCK_STRICT:
+        if config.FP_BLOCK_STRICT:
             logger.warning(f"FP recém-criado bloqueado: fp={fp_hash[:12]}… age=0min ip={ip} ln={ln}")
             return True
         else:
@@ -647,7 +691,7 @@ def register_node_pubkey(claim_id: int, pubkey: str):
 # ── Reward progressivo ────────────────────────────────────────────────────────
 
 def get_progressive_reward(ln_address: str) -> int:
-    if not PROGRESSIVE_REWARDS:
+    if not config.PROGRESSIVE_REWARDS:
         return FAUCET_AMOUNT_SAT
     with get_db() as conn:
         count = conn.execute(
@@ -886,13 +930,13 @@ def cleanup_stale_pending():
             UPDATE claims SET status='orphan'
             WHERE status='pending'
             AND payment_hash IS NOT NULL AND payment_hash != ''
-            AND claimed_at < datetime('now', '-5 minutes')
+            AND datetime(claimed_at) < datetime('now', '-5 minutes')
         """).rowcount
         n = conn.execute("""
             UPDATE claims SET status='failed'
             WHERE status='pending'
             AND (payment_hash IS NULL OR payment_hash = '')
-            AND claimed_at < datetime('now', '-5 minutes')
+            AND datetime(claimed_at) < datetime('now', '-5 minutes')
         """).rowcount
         conn.commit()
     if orphans:
@@ -938,7 +982,7 @@ async def lifespan(app: FastAPI):
                         n = conn.execute("""
                             DELETE FROM claims
                             WHERE status IN ('failed','orphan')
-                            AND claimed_at < datetime('now', '-60 days')
+                            AND datetime(claimed_at) < datetime('now', '-60 days')
                         """).rowcount
                         # [FIX] IP exato só é operacionalmente necessário dentro
                         # da janela de cooldown (24h). Depois disso, substitui
@@ -950,7 +994,7 @@ async def lifespan(app: FastAPI):
                             WHERE status='paid'
                             AND ip_address IS NOT NULL AND ip_address != ''
                             AND ip_address != ip_prefix
-                            AND claimed_at < datetime('now', '-25 hours')
+                            AND datetime(claimed_at) < datetime('now', '-25 hours')
                         """).rowcount
                         conn.commit()
                     if n:
@@ -1177,11 +1221,15 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
     if not re.match(r'^[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,}$', domain):
         raise HTTPException(400, "LN Address inválido")
     url = f"https://{domain}/.well-known/lnurlp/{user}"
+    await _assert_public_https_url(url)
     try:
         client = http_client or httpx.AsyncClient(timeout=10)
         _owns_client = http_client is None
         try:
-            r1 = await client.get(url, timeout=10, follow_redirects=True)
+            # follow_redirects=False: um LNURLp malicioso não pode usar um 3xx
+            # pra escapar da checagem de host acima (checamos só a URL final que
+            # nós mesmos montamos — um redirect trocaria o destino sem re-validação)
+            r1 = await client.get(url, timeout=10, follow_redirects=False)
             if r1.status_code != 200:
                 raise HTTPException(400, "LN Address não encontrado ou indisponível")
             meta = r1.json()
@@ -1196,9 +1244,10 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
             # (domínio pode diferir do LN Address, ex: WoS usa livingroomofsatoshi.com)
             if not callback.startswith("https://"):
                 raise HTTPException(400, "LN Address inválido: callback deve usar HTTPS")
+            await _assert_public_https_url(callback)
             metadata = str(meta.get("metadata", ""))
             wallet_hash = compute_wallet_hash(callback, metadata)
-            r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10, follow_redirects=True)
+            r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10, follow_redirects=False)
             data2 = r2.json()
             if data2.get("status") == "ERROR":
                 raise HTTPException(400, data2.get("reason", "Erro ao gerar invoice"))
@@ -1229,11 +1278,66 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
         raise HTTPException(400, "Não foi possível contatar a wallet. Verifique o LN Address.")
 
 class PaymentInitiatedError(Exception):
-    """Pagamento foi enviado ao LNbits mas confirmação não chegou a tempo.
-    Marcar claim como orphan — NÃO como failed — para evitar re-claim duplo."""
+    """Pagamento foi enviado (LNbits ou Spark) mas confirmação não chegou a
+    tempo. Marcar claim como orphan — NÃO como failed — para evitar re-claim duplo."""
     def __init__(self, payment_hash: str):
         super().__init__("Payment initiated but confirmation timed out")
         self.payment_hash = payment_hash
+
+
+async def pay_invoice_spark(bolt11: str, claim_id, http_client: httpx.AsyncClient = None) -> dict:
+    """Paga via sidecar Spark (spark-sidecar/) — mesmo contrato de retorno que
+    pay_invoice() (LNbits): dict com payment_hash/payment_preimage em sucesso,
+    PaymentInitiatedError se incerto (orphan), HTTPException(503) se falhou.
+
+    claim_id vira o transferId idempotente no sidecar — retentar esta função
+    pro MESMO claim_id nunca paga duas vezes (dedup no backend da Spark),
+    diferente do LNbits onde tivemos que implementar isso manualmente.
+    """
+    payment_hash = decode_bolt11_payment_hash(bolt11) or ""
+    client = http_client or httpx.AsyncClient(timeout=90)
+    _owns_client = http_client is None
+    try:
+        try:
+            r = await client.post(
+                f"{config.SPARK_SIDECAR_URL}/pay",
+                json={"claim_id": claim_id, "invoice": bolt11, "max_fee_sats": config.SPARK_MAX_FEE_SAT},
+                headers={"X-Sidecar-Token": config.SPARK_SIDECAR_TOKEN},
+                timeout=90,
+            )
+        except (httpx.HTTPError, asyncio.CancelledError) as e:
+            # Não sabemos se o sidecar chegou a chamar payLightningInvoice —
+            # como o transferId é determinístico (claim_id), é seguro tratar
+            # como incerto: uma futura tentativa com o mesmo claim_id não
+            # duplica o pagamento no backend da Spark.
+            logger.error(f"pay_invoice_spark: erro de conexão com o sidecar (claim {claim_id}): {e}")
+            raise PaymentInitiatedError(payment_hash)
+
+        if r.status_code == 400:
+            raise HTTPException(503, "Não foi possível processar o pagamento. Tente novamente.")
+        if r.status_code == 401:
+            logger.critical("pay_invoice_spark: SPARK_SIDECAR_TOKEN inválido — checar .env dos dois lados")
+            raise HTTPException(503, "Serviço de pagamento indisponível.")
+        if r.status_code == 503:
+            raise PaymentInitiatedError(payment_hash)
+
+        data = r.json()
+        status = data.get("status")
+        if status == "paid":
+            return {
+                "payment_hash": payment_hash or data.get("request_id", ""),
+                "payment_preimage": data.get("preimage") or "",
+            }
+        if status == "failed":
+            logger.warning(f"pay_invoice_spark: falha definitiva (claim {claim_id}): {data.get('reason')}")
+            raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
+        # 'pending' — payLightningInvoice não resolveu num estado terminal
+        # (ou a própria chamada HTTP deu erro tratado no sidecar). Mesmo
+        # transferId determinístico garante que não duplica.
+        raise PaymentInitiatedError(payment_hash)
+    finally:
+        if _owns_client:
+            await client.aclose()
 
 
 async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dict:
@@ -1317,12 +1421,18 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
                     json={"out": True, "bolt11": bolt11},
                     headers=headers,
                 )
-        except Exception as e:
-            logger.error(f"pay_invoice LNbits conexão falhou (tentativa {attempt+1}/3): {e}")
+        except (Exception, asyncio.CancelledError) as e:
+            logger.error(f"pay_invoice LNbits conexão falhou/cancelada (tentativa {attempt+1}/3): {type(e).__name__}: {e}")
             already = await _resolve_uncertain_send()
             if already:
-                logger.info("Pagamento confirmado via checagem pós-falha de conexão")
+                logger.info("Pagamento confirmado via checagem pós-falha/cancelamento")
                 return already
+            if isinstance(e, asyncio.CancelledError):
+                # Requisição cancelada (cliente desconectou, restart do serviço) —
+                # já confirmamos acima que o pagamento NÃO saiu (ou está incerto,
+                # caso em que _resolve_uncertain_send já levantou PaymentInitiatedError).
+                # Não adianta continuar tentando: o contexto da requisição está indo embora.
+                raise
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             continue
@@ -1370,57 +1480,74 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
     if not last_payment_hash:
         raise HTTPException(503, "Não foi possível processar o pagamento. Tente novamente.")
 
-    # ── Fase 1: polling rápido (10 × 3s = 30s) ───────────────────────────────
-    for poll in range(10):
-        await asyncio.sleep(3)
-        try:
-            async with httpx.AsyncClient(timeout=15) as pc:
-                pr = await pc.get(
-                    f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
-                    headers=headers,
-                )
-            pd = pr.json()
-            if pd.get("preimage") and pd.get("paid"):
-                logger.info(f"Pagamento confirmado no poll rápido {poll+1}")
-                await _alert_if_fee_high(pd)
-                return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
-            if pd.get("status") == "failed":
-                definitively_failed = True
-                logger.warning(f"Pagamento falhou no poll rápido {poll+1}")
-                break
-        except Exception as pe:
-            logger.warning(f"Polling rápido erro {poll+1}: {pe}")
+    try:
+        # ── Fase 1: polling rápido (10 × 3s = 30s) ───────────────────────────────
+        for poll in range(10):
+            await asyncio.sleep(3)
+            try:
+                async with httpx.AsyncClient(timeout=15) as pc:
+                    pr = await pc.get(
+                        f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
+                        headers=headers,
+                    )
+                pd = pr.json()
+                if pd.get("preimage") and pd.get("paid"):
+                    logger.info(f"Pagamento confirmado no poll rápido {poll+1}")
+                    await _alert_if_fee_high(pd)
+                    return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
+                if pd.get("status") == "failed":
+                    definitively_failed = True
+                    logger.warning(f"Pagamento falhou no poll rápido {poll+1}")
+                    break
+            except Exception as pe:
+                logger.warning(f"Polling rápido erro {poll+1}: {pe}")
 
-    if definitively_failed:
+        if definitively_failed:
+            raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
+
+        # ── Fase 2: polling lento — 4 tentativas × 60s (5 total com a fase rápida) ─
+        for slow in range(4):
+            logger.info(f"Aguardando confirmação: poll lento {slow+1}/4 | hash={last_payment_hash[:16]}…")
+            await asyncio.sleep(60)
+            try:
+                async with httpx.AsyncClient(timeout=15) as pc:
+                    pr = await pc.get(
+                        f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
+                        headers=headers,
+                    )
+                pd = pr.json()
+                if pd.get("preimage") and pd.get("paid"):
+                    logger.info(f"Pagamento confirmado no poll lento {slow+1}")
+                    await _alert_if_fee_high(pd)
+                    return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
+                if pd.get("status") == "failed":
+                    definitively_failed = True
+                    logger.warning(f"Pagamento falhou no poll lento {slow+1}")
+                    break
+            except Exception as pe:
+                logger.warning(f"Polling lento erro {slow+1}: {pe}")
+
+        # Após 5ª tentativa sem confirmação definitiva — incerto, risco de duplo gasto
+        if not definitively_failed:
+            raise PaymentInitiatedError(last_payment_hash)
+
         raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
-
-    # ── Fase 2: polling lento — 4 tentativas × 60s (5 total com a fase rápida) ─
-    for slow in range(4):
-        logger.info(f"Aguardando confirmação: poll lento {slow+1}/4 | hash={last_payment_hash[:16]}…")
-        await asyncio.sleep(60)
-        try:
-            async with httpx.AsyncClient(timeout=15) as pc:
-                pr = await pc.get(
-                    f"{LNBITS_URL}/api/v1/payments/{last_payment_hash}",
-                    headers=headers,
-                )
-            pd = pr.json()
-            if pd.get("preimage") and pd.get("paid"):
-                logger.info(f"Pagamento confirmado no poll lento {slow+1}")
-                await _alert_if_fee_high(pd)
-                return {"payment_hash": last_payment_hash, "payment_preimage": pd["preimage"]}
-            if pd.get("status") == "failed":
-                definitively_failed = True
-                logger.warning(f"Pagamento falhou no poll lento {slow+1}")
-                break
-        except Exception as pe:
-            logger.warning(f"Polling lento erro {slow+1}: {pe}")
-
-    # Após 5ª tentativa sem confirmação definitiva — incerto, risco de duplo gasto
-    if not definitively_failed:
+    except asyncio.CancelledError:
+        # payment_hash já existe — o LNbits aceitou o envio. Uma cancelação aqui
+        # (cliente desconectou, restart do serviço) não prova que o pagamento
+        # falhou: tratar como incerto (orphan), nunca como 'failed', para não
+        # abrir brecha de re-claim enquanto o pagamento pode já ter saído.
+        logger.error(f"pay_invoice: polling cancelado com pagamento em voo — hash={last_payment_hash[:16]}…")
         raise PaymentInitiatedError(last_payment_hash)
 
-    raise HTTPException(503, "Não foi possível confirmar o pagamento. Tente novamente.")
+
+async def pay_invoice_dispatch(bolt11: str, claim_id, http_client: httpx.AsyncClient = None) -> dict:
+    """Escolhe o rail de pagamento (Spark ou LNbits) num só lugar — os dois
+    pontos de chamada (claim normal + fallback WoS) não precisam saber qual
+    está ativo. Trocar de rail é só SPARK_PAYOUTS_ENABLED no .env."""
+    if config.SPARK_PAYOUTS_ENABLED:
+        return await pay_invoice_spark(bolt11, claim_id, http_client=http_client)
+    return await pay_invoice(bolt11, http_client=http_client)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/api/status")
@@ -1448,6 +1575,9 @@ async def api_pow_challenge(request: Request):
 @app.post("/api/check-suspect")
 async def check_suspect(body: CheckSuspectRequest, request: Request):
     """Retorna se LN address pertence a domínio suspeito (dose dupla)."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(ip, max_req=20, window=60):
+        raise HTTPException(429, "Muitas requisições.")
     ln = body.ln_address.strip().lower()
     if "@" not in ln:
         return {"suspect": False}
@@ -1471,7 +1601,7 @@ async def api_stats(request: Request):
     }
     
     # Adiciona info de rewards progressivos se habilitado
-    if PROGRESSIVE_REWARDS:
+    if config.PROGRESSIVE_REWARDS:
         stats["progressive_rewards"] = {
             "enabled": True,
             "tier_1": REWARD_TIER_1,
@@ -1891,7 +2021,7 @@ async def claim(req: ClaimRequest, request: Request):
 
         # 5 – Pagar via Phoenix (síncrono — confirma antes de retornar)
         try:
-            result = await pay_invoice(bolt11, http_client=http)
+            result = await pay_invoice_dispatch(bolt11, claim_id, http_client=http)
             payment_hash = result.get("payment_hash", "")
 
             # Persistir status='paid' com retry — se falhar, o registro fica com
@@ -2053,7 +2183,7 @@ async def claim_fallback(body: ClaimFallbackRequest, request: Request):
             SELECT id, ln_address, amount_sat, ip_address, claimed_at
             FROM claims
             WHERE id=? AND status='failed'
-              AND claimed_at >= datetime('now', '-15 minutes')
+              AND datetime(claimed_at) >= datetime('now', '-15 minutes')
         """, (claim_id,)).fetchone()
 
     if not claim:
@@ -2121,7 +2251,10 @@ async def claim_fallback(body: ClaimFallbackRequest, request: Request):
                         ))
                         raise HTTPException(403, "Este node Lightning já foi utilizado com outro endereço. Acesso negado.")
 
-                result = await pay_invoice(bolt11, http_client=http)
+                # transferId diferenciado ("-fallback"): é um invoice DIFERENTE do
+                # claim original (wallet alternativa) — usar o mesmo claim_id faria
+                # a Spark tratar como duplicata do pagamento original, que já falhou.
+                result = await pay_invoice_dispatch(bolt11, f"{claim_id}-fallback", http_client=http)
                 payment_hash = result.get("payment_hash", "")
         except HTTPException:
             # Reverter para 'failed' para permitir nova tentativa de fallback
@@ -2182,6 +2315,23 @@ async def claim_fallback(body: ClaimFallbackRequest, request: Request):
 async def lnurlp_proxy(username: str, request: Request):
     if not re.match(r'^[a-zA-Z0-9._+\-]{1,64}$', username):
         raise HTTPException(400, "Username inválido")
+
+    # LN Address da carteira Spark dedicada — mesmo path, backend diferente.
+    # Checado ANTES do proxy pro LNbits pra não colidir com um username real
+    # configurado lá (ex: se alguém também cadastrar "doar" no LNbits).
+    if config.LN_ADDRESS_ENABLED and username.lower() in config.LN_ADDRESS_USERS:
+        ip = get_client_ip(request)
+        if not await check_rate_limit(ip, max_req=20, window=60):
+            raise HTTPException(429, "Muitas requisições.")
+        metadata = _lnurlp_metadata(username)
+        return {
+            "callback": f"{config.SITE_URL}/api/lnurlp/callback/{username}",
+            "minSendable": config.LN_ADDRESS_MIN_SATS * 1000,
+            "maxSendable": config.LN_ADDRESS_MAX_SATS * 1000,
+            "metadata": metadata,
+            "tag": "payRequest",
+        }
+
     ALLOWED_QP = {"amount", "comment", "nostr"}
     params = {k: v for k, v in request.query_params.items() if k in ALLOWED_QP}
     async with httpx.AsyncClient() as client:
@@ -2210,7 +2360,55 @@ async def lnurlp_callback_proxy(cb_id: str, request: Request):
 @app.post("/api/verify-canvas")
 async def verify_canvas_hash(body: dict, request: Request):
     """Aceita canvas hash — registrado mas não bloqueante por ora."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(ip, max_req=20, window=60):
+        raise HTTPException(429, "Muitas requisições.")
     return {"ok": True}
+
+def _lnurlp_metadata(user: str) -> str:
+    """Metadata LUD-06/LUD-16, string exata (compacta, sem espaço) — tem que
+    ser byte-a-byte idêntica entre a resposta do well-known e o hash embutido
+    no invoice (descriptionHash), senão a wallet que paga rejeita."""
+    domain = config.SITE_URL.replace("https://", "").replace("http://", "").rstrip("/")
+    address = f"{user}@{domain}"
+    payload = [
+        ["text/plain", f"Pagamento para {address}"],
+        ["text/identifier", address],
+    ]
+    return json.dumps(payload, separators=(",", ":"))
+
+
+@app.get("/api/lnurlp/callback/{user}")
+async def lnurlp_callback(user: str, amount: int, request: Request):
+    """Callback do LNURLp — gera um invoice novo na carteira Spark pro valor
+    pedido, com descriptionHash batendo com a metadata do well-known."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(ip, max_req=20, window=60):
+        raise HTTPException(429, "Muitas requisições.")
+    if not config.LN_ADDRESS_ENABLED or user.lower() not in config.LN_ADDRESS_USERS:
+        raise HTTPException(404, "LN Address não encontrado.")
+    min_msat = config.LN_ADDRESS_MIN_SATS * 1000
+    max_msat = config.LN_ADDRESS_MAX_SATS * 1000
+    if not (min_msat <= amount <= max_msat):
+        raise HTTPException(400, f"Valor fora do range [{min_msat}–{max_msat}] msat")
+    description_hash = hashlib.sha256(_lnurlp_metadata(user).encode()).hexdigest()
+    try:
+        http = request.app.state.http_client
+        r = await http.post(
+            f"{config.SPARK_SIDECAR_URL}/invoice",
+            json={"amount_sats": amount // 1000, "description_hash": description_hash},
+            headers={"X-Sidecar-Token": config.SPARK_SIDECAR_TOKEN},
+            timeout=15.0,
+        )
+        if r.status_code != 200:
+            raise HTTPException(502, "Não foi possível gerar o invoice agora. Tente de novo.")
+        return {"pr": r.json()["bolt11"], "routes": []}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"lnurlp_callback error: {e}")
+        raise HTTPException(502, "Não foi possível gerar o invoice agora. Tente de novo.")
+
 
 @app.get("/health")
 async def health():

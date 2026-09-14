@@ -1,0 +1,17 @@
+{
+  "name": "btcfaucet-spark-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sidecar HTTP interno (127.0.0.1) que expõe a carteira Spark dedicada do BTCfaucet pro main.py (Python) chamar, já que o SDK da Spark só existe em JS/TS.",
+  "type": "module",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@buildonspark/spark-sdk": "^0.11.0",
+    "bip39": "^3.1.0",
+    "dotenv": "^16.4.5",
+    "uuidv7": "^1.2.1"
+  }
+}

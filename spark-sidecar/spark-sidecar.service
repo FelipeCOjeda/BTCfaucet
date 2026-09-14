@@ -1,0 +1,33 @@
+[Unit]
+Description=BTCFaucet Spark Wallet Sidecar (Node)
+After=network.target
+Before=ln-faucet.service
+
+[Service]
+Type=simple
+User=felipe
+Group=felipe
+WorkingDirectory=/home/felipe/Bots/BTCfaucet/spark-sidecar
+# Lê o .env do BTCfaucet (mesmo arquivo, ver src/server.mjs) — não precisa
+# de EnvironmentFile aqui, o dotenv já resolve o caminho absoluto.
+
+ExecStart=/usr/bin/node /home/felipe/Bots/BTCfaucet/spark-sidecar/src/server.mjs
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spark-sidecar
+
+# [FIX] IPAddressDeny=any bloqueava TAMBÉM as conexões de SAÍDA — inclusive
+# a da própria carteira Spark pra rede real (0.spark.lightspark.com), que
+# nunca conseguia autenticar (DNS/gRPC bloqueado pelo sandboxing do systemd).
+# O bind 127.0.0.1 no server.mjs já garante que ninguém de fora conecta NELE;
+# não tem como restringir só entrada com essas diretivas sem também travar
+# a saída, então removido — não são a proteção certa aqui.
+
+LimitNOFILE=65536
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

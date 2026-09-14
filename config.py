@@ -17,6 +17,25 @@ PHOENIXD_URL = os.getenv("PHOENIXD_URL", "http://127.0.0.1:9740")
 PHOENIXD_PASSWORD = os.getenv("PHOENIXD_PASSWORD", "")
 PHOENIX_MAX_FEE_SAT = int(os.getenv("PHOENIX_MAX_FEE_SAT", "20"))
 
+# ── Spark (carteira dedicada, via sidecar Node em spark-sidecar/) ─────────────
+# Desligado por padrão — pagamentos continuam via LNbits até o wallet Spark
+# ser fundado e testado com um pagamento real. Ver SPARK_FAUCET_WALLET_* pro
+# mnemonic/passphrase (usados só pelo sidecar, main.py nunca lê os segredos
+# da carteira diretamente — só fala HTTP com o sidecar).
+SPARK_PAYOUTS_ENABLED = os.getenv("SPARK_PAYOUTS_ENABLED", "false").lower() == "true"
+SPARK_SIDECAR_URL = os.getenv("SPARK_SIDECAR_URL", "http://127.0.0.1:8791")
+SPARK_SIDECAR_TOKEN = os.getenv("SPARK_SIDECAR_TOKEN", "")
+SPARK_MAX_FEE_SAT = int(os.getenv("SPARK_MAX_FEE_SAT", "10"))
+
+# ── LN Address pública (LNURLp) pra RECEBER na carteira Spark ─────────────────
+# Feature independente do SPARK_PAYOUTS_ENABLED: só recebe (sem risco de
+# double-spend/dreno de carteira), então liga separado — não precisa esperar
+# o cutover de pagamentos pra já dar pra fundar a carteira via LN Address.
+LN_ADDRESS_ENABLED = os.getenv("LN_ADDRESS_ENABLED", "false").lower() == "true"
+LN_ADDRESS_USERS = {u.strip().lower() for u in os.getenv("LN_ADDRESS_USERS", "doar,donate").split(",") if u.strip()}
+LN_ADDRESS_MIN_SATS = int(os.getenv("LN_ADDRESS_MIN_SATS", "1"))
+LN_ADDRESS_MAX_SATS = int(os.getenv("LN_ADDRESS_MAX_SATS", "1000000"))
+
 # ── hCaptcha ──────────────────────────────────────────────────────────────────
 HCAPTCHA_SECRET = os.getenv("HCAPTCHA_SECRET", "")
 HCAPTCHA_SITEKEY = os.getenv("HCAPTCHA_SITEKEY", "")
@@ -123,11 +142,24 @@ if _missing:
 
 # [FIX] Secret de teste oficial do hCaptcha (sempre aprova qualquer token) —
 # se ficar configurado em produção por engano (cópia de ambiente de staging,
-# etc.), toda a validação de captcha é pulada silenciosamente.
+# etc.), toda a validação de captcha é pulada silenciosamente. Falha o boot
+# por padrão — só segue com ALLOW_TEST_HCAPTCHA=true (ambiente de teste real).
 if HCAPTCHA_SECRET == "0x0000000000000000000000000000000000000000":
+    if os.getenv("ALLOW_TEST_HCAPTCHA", "false").lower() != "true":
+        raise RuntimeError(
+            "HCAPTCHA_SECRET está com o valor de TESTE oficial do hCaptcha — "
+            "captcha seria aprovado sem verificação real. Troque HCAPTCHA_SECRET, "
+            "ou defina ALLOW_TEST_HCAPTCHA=true no .env se isto for intencional "
+            "(ambiente de teste)."
+        )
     import logging as _logging
     _logging.getLogger("faucet").critical(
         "HCAPTCHA_SECRET está com o valor de TESTE oficial do hCaptcha — "
-        "captcha está sendo aprovado sem verificação real. Se isto não é "
-        "um ambiente de teste, troque HCAPTCHA_SECRET imediatamente."
+        "captcha está sendo aprovado sem verificação real (ALLOW_TEST_HCAPTCHA=true)."
+    )
+
+if (SPARK_PAYOUTS_ENABLED or LN_ADDRESS_ENABLED) and not SPARK_SIDECAR_TOKEN:
+    raise RuntimeError(
+        "SPARK_PAYOUTS_ENABLED ou LN_ADDRESS_ENABLED=true mas SPARK_SIDECAR_TOKEN "
+        "não configurado — sem o token o main.py não consegue autenticar no sidecar Spark."
     )

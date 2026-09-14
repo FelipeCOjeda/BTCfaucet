@@ -1156,7 +1156,7 @@ async function doClaim() {
         errMsg = d.detail || L.err_cooldown;
       } else if (r.status === 403) {
         // Se o backend mandou mensagem específica (ex: FP cookies), usa ela
-        errMsg = (msg && msg.length > 10) ? `✗ ${d.detail}` : L.err_blocked;
+        errMsg = (d.detail && d.detail.length > 10) ? `✗ ${d.detail}` : L.err_blocked;
       } else if (r.status === 400 && (detail.includes('address') || detail.includes('lnurl') || detail.includes('wallet') || detail.includes('inválido') || detail.includes('encontrado'))) {
         errMsg = d.detail || L.err_invalid;
       } else if (r.status >= 500) {

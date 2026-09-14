@@ -22,6 +22,7 @@ from config import (
     LNBITS_ADMIN_KEY,
     LNBITS_URL,
     SERVICE_NAME,
+    SPARK_SIDECAR_URL,
     TELEGRAM_ADMIN_IDS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
@@ -320,6 +321,20 @@ async def _wallet_balance() -> str:
 
     except Exception as e:
         return f"❌ Erro ao consultar saldo: {e}"
+
+
+async def _spark_balance() -> str:
+    """Consulta saldo da carteira Spark dedicada — watch-only (endereço
+    público, SparkReadonlyClient.createPublic no sidecar), sem token, sem
+    nenhuma chave envolvida na consulta."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{SPARK_SIDECAR_URL}/balance-public")
+            r.raise_for_status()
+            data = r.json()
+        return f"⚡ <b>Saldo Spark:</b> {data['balance_sats']:,} sats\n<code>{data['address']}</code>"
+    except Exception as e:
+        return f"❌ Erro ao consultar saldo Spark (sidecar rodando?): {e}"
 
 
 async def _generate_invoice(amount_sats: int = 2000) -> str:
@@ -929,15 +944,17 @@ async def handle_message(update: dict) -> Optional[str]:
 
     # Autorização por user_id — só o chat_id não basta (em grupos qualquer membro
     # adicionado ganharia controle total do serviço e da lógica anti-fraude).
-    if TELEGRAM_ADMIN_IDS:
-        if user_id not in TELEGRAM_ADMIN_IDS:
-            logger.warning(f"Comando negado — user_id={user_id} (@{username}) não autorizado: {text[:40]}")
-            return "🚫 Não autorizado. Use /whoami e peça ao admin para autorizar seu ID."
-    else:
+    # Fail-closed: sem allowlist configurada, NENHUM comando administrativo roda
+    # (exceto /whoami acima, que só revela o próprio ID pra configuração inicial).
+    if not TELEGRAM_ADMIN_IDS:
         logger.warning(
-            f"TELEGRAM_ADMIN_IDS vazio — comando aceito só por chat_id (INSEGURO). "
+            f"TELEGRAM_ADMIN_IDS vazio — comando negado (fail-closed). "
             f"Configure a allowlist. user_id={user_id} cmd={cmd}"
         )
+        return "🚫 TELEGRAM_ADMIN_IDS não configurado. Use /whoami e adicione seu user_id no .env para habilitar comandos."
+    if user_id not in TELEGRAM_ADMIN_IDS:
+        logger.warning(f"Comando negado — user_id={user_id} (@{username}) não autorizado: {text[:40]}")
+        return "🚫 Não autorizado. Use /whoami e peça ao admin para autorizar seu ID."
 
     # ─── BLOQUEIOS ────────────────────────────────────────────────────────
     if cmd == "/block_ip":
@@ -1009,6 +1026,9 @@ async def handle_message(update: dict) -> Optional[str]:
     elif cmd == "/saldo":
         return await _wallet_balance()
 
+    elif cmd == "/saldo_spark":
+        return await _spark_balance()
+
     elif cmd == "/invoice":
         amount = int(args[0]) if args and args[0].isdigit() else 2000
         return await _generate_invoice(amount)
@@ -1073,7 +1093,8 @@ async def handle_message(update: dict) -> Optional[str]:
             "/down - Derruba o faucet\n"
             "/up - Sobe o faucet\n\n"
             "<b>💰 Wallet:</b>\n"
-            "/saldo - Consulta saldo da wallet\n"
+            "/saldo - Consulta saldo da wallet (LNbits)\n"
+            "/saldo_spark - Consulta saldo da carteira Spark (watch-only)\n"
             "/invoice [sats] - Gera invoice (padrão 2000 sats)\n\n"
             "<b>📊 Monitoramento:</b>\n"
             "/abuse - Abusos nas últimas 6h\n"

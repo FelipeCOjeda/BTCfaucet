@@ -3,6 +3,7 @@
 
 # Database
 faucet.db
+*.db
 
 # Python
 venv/
@@ -10,6 +11,18 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Node (spark-sidecar/)
+node_modules/
+
 # Sistema
 .DS_Store
 *.log
+*.swp
+
+# Backups/relatórios/sessões locais — nunca devem ir pro repo
+main.py.backup-*
+SESSAO_*
+RELATORIO_*
+_deprecated/
+perdidos/
+static/partners/
