@@ -1052,11 +1052,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const inp    = document.getElementById('ln-address');
   const btn    = document.getElementById('btn-step1');
   const errEl  = document.getElementById('step1-error');
-  const LN_RE  = /^[^\s@]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
   if (inp && btn) {
     inp.addEventListener('input', () => {
       const v = inp.value.trim();
-      const valid = LN_RE.test(v);
+      const valid = isValidDestinationFormat(v);
       btn.disabled = !valid;
       // Limpa erro ao digitar para não confundir o usuário
       if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
