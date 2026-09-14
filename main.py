@@ -35,6 +35,7 @@ from config import (
 )
 
 from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check, run_farm_check
+from spark_address import validate_spark_address
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1122,6 +1123,24 @@ def is_valid_ln_address(address: str) -> tuple[bool, str]:
         return False, f"'{domain}' não é uma wallet Lightning. Use Wallet of Satoshi, Blink, Alby, etc."
     return True, ""
 
+
+def is_spark_destination(address: str) -> bool:
+    """Só o formato (prefixo) — checksum/estrutura são validados de verdade
+    em is_valid_destination via validate_spark_address."""
+    return address.lower().startswith("spark1")
+
+
+def is_valid_destination(address: str) -> tuple[bool, str, str]:
+    """Aceita LN Address (usuario@dominio) OU endereço Spark nativo (spark1...).
+    Retorna (válido, mensagem_de_erro, tipo) — tipo é 'ln' ou 'spark'."""
+    if is_spark_destination(address):
+        info = validate_spark_address(address)
+        if not info.valid:
+            return False, f"Endereço Spark inválido: {info.reason}", "spark"
+        return True, "", "spark"
+    valid, err = is_valid_ln_address(address)
+    return valid, err, "ln"
+
 # ── [FIX #5] Sanitização do fp_hash ──────────────────────────────────────────
 def sanitize_fp_hash(fp: Optional[str]) -> Optional[str]:
     """Valida que é SHA-256 hex (64 chars). Rejeita silenciosamente qualquer outra coisa."""
@@ -1541,6 +1560,52 @@ async def pay_invoice(bolt11: str, http_client: httpx.AsyncClient = None) -> dic
         raise PaymentInitiatedError(last_payment_hash)
 
 
+async def pay_spark_transfer(spark_address: str, claim_id, amount_sat: int, http_client: httpx.AsyncClient = None) -> dict:
+    """Transferência Spark nativa (sem passar pela rede Lightning) via
+    wallet.transfer() do sidecar. Mesmo contrato de retorno que
+    pay_invoice_spark() (dict com "payment_hash", aqui reaproveitado pra
+    guardar o transfer_id — a coluna do banco é só TEXT).
+
+    LIMITAÇÃO conhecida: diferente de payLightningInvoice, wallet.transfer()
+    não tem um parâmetro de idempotência nativo (sem transferId) — uma
+    retentativa após timeout/cancelamento pode, em teoria, duplicar o envio.
+    Mitigado do mesmo jeito que o resto do sistema mitiga incerteza: qualquer
+    erro na chamada levanta PaymentInitiatedError (orphan), nunca falha
+    silenciosa — orphans exigem conferência manual, igual ao que já era
+    necessário pro caminho WoS antes desta sessão."""
+    payment_hash = f"spark-transfer:{claim_id}"
+    client = http_client or httpx.AsyncClient(timeout=30)
+    _owns_client = http_client is None
+    try:
+        try:
+            r = await client.post(
+                f"{config.SPARK_SIDECAR_URL}/transfer",
+                json={"receiver_spark_address": spark_address, "amount_sats": amount_sat},
+                headers={"X-Sidecar-Token": config.SPARK_SIDECAR_TOKEN},
+                timeout=30,
+            )
+        except (httpx.HTTPError, asyncio.CancelledError) as e:
+            logger.error(f"pay_spark_transfer: erro de conexão com o sidecar (claim {claim_id}): {e}")
+            raise PaymentInitiatedError(payment_hash)
+
+        if r.status_code == 400:
+            raise HTTPException(503, "Não foi possível processar o pagamento. Tente novamente.")
+        if r.status_code == 401:
+            logger.critical("pay_spark_transfer: SPARK_SIDECAR_TOKEN inválido — checar .env dos dois lados")
+            raise HTTPException(503, "Serviço de pagamento indisponível.")
+
+        data = r.json()
+        if r.status_code == 200 and data.get("status") == "paid":
+            return {"payment_hash": data.get("transfer_id") or payment_hash}
+        # 502/"unknown" — a chamada falhou mas pode ter sido processada no
+        # backend da Spark antes de falhar em retornar; incerto, não failed.
+        logger.error(f"pay_spark_transfer: resposta incerta do sidecar (claim {claim_id}): {data}")
+        raise PaymentInitiatedError(payment_hash)
+    finally:
+        if _owns_client:
+            await client.aclose()
+
+
 async def pay_invoice_dispatch(bolt11: str, claim_id, http_client: httpx.AsyncClient = None) -> dict:
     """Escolhe o rail de pagamento (Spark ou LNbits) num só lugar — os dois
     pontos de chamada (claim normal + fallback WoS) não precisam saber qual
@@ -1691,9 +1756,12 @@ async def check_address(body: CheckAddressRequest, request: Request):
     if not ln:
         raise HTTPException(400, "Informe um LN Address")
 
-    valid, err_msg = is_valid_ln_address(ln)
+    valid, err_msg, dest_kind = is_valid_destination(ln)
     if not valid:
         return {"blocked": True, "wait_seconds": 0, "reason": "invalid_address", "message": err_msg}
+    if dest_kind == "spark" and not config.SPARK_PAYOUTS_ENABLED:
+        return {"blocked": True, "wait_seconds": 0, "reason": "spark_disabled",
+                "message": "Pagamento direto pra endereço Spark está desativado no momento."}
 
     # Blacklist check (via security module)
     if is_dynamically_blocked(ip=ip, fp=fp, ln=ln):
@@ -1737,10 +1805,12 @@ async def claim(req: ClaimRequest, request: Request):
     if not await check_rate_limit(ip, max_req=5, window=60):
         raise HTTPException(429, "Muitas requisições. Tente novamente.")
 
-    # 0 – Validação de formato
-    valid, err_msg = is_valid_ln_address(ln)
+    # 0 – Validação de formato (LN Address OU endereço Spark nativo)
+    valid, err_msg, dest_kind = is_valid_destination(ln)
     if not valid:
         raise HTTPException(400, err_msg)
+    if dest_kind == "spark" and not config.SPARK_PAYOUTS_ENABLED:
+        raise HTTPException(400, "Pagamento direto pra endereço Spark está desativado no momento. Use um Lightning Address.")
 
     # WHITELIST_ADM — fura todos os bloqueios e cooldowns
     _is_adm = ln in config.WHITELIST_ADM
@@ -1924,10 +1994,25 @@ async def claim(req: ClaimRequest, request: Request):
             claim_id = cur.lastrowid
             conn.commit()
 
-        # 5 – Resolver LN Address → invoice + wallet fingerprint
+        # 5 – Resolver destino (LN Address → invoice, ou validar endereço Spark
+        # nativo) + wallet fingerprint. Pra Spark, a pubkey de identidade
+        # embutida no próprio endereço já FAZ o papel de wallet_hash e de
+        # dest_pubkey ao mesmo tempo (não existe distinção wallet/node como
+        # em LN) — reaproveita as mesmas checagens de fraude sem duplicar lógica.
         http = request.app.state.http_client
+        bolt11 = None
         try:
-            bolt11, wallet_hash = await resolve_ln_address(ln, reward_amount, http_client=http)
+            if dest_kind == "spark":
+                dest_pubkey = validate_spark_address(ln).identity_pubkey_hex
+                wallet_hash = dest_pubkey
+            else:
+                bolt11, wallet_hash = await resolve_ln_address(ln, reward_amount, http_client=http)
+                # decode_bolt11_pubkey usa recuperação ECDSA da assinatura real
+                # do invoice como fonte de verdade — não confia isoladamente no
+                # campo opcional "n", que um LNURLp malicioso poderia forjar.
+                dest_pubkey = decode_bolt11_pubkey(bolt11)
+                if not dest_pubkey:
+                    logger.warning(f"Não foi possível decodificar node pubkey do bolt11 | ln={ln} ip={ip}")
             # Verificar se carteira já foi vista com outro LN address
             if ln not in config.WHITELIST_ADM and ln not in config.WHITELIST:
                 # Serializar por wallet_hash: sem isto, dois LN addresses distintos
@@ -1981,13 +2066,11 @@ async def claim(req: ClaimRequest, request: Request):
                         conn.commit()
                     raise HTTPException(403, "Este IP já foi utilizado para receber sats hoje.")
 
-                # Verificar node pubkey de destino ANTES de pagar. decode_bolt11_pubkey
-                # usa recuperação ECDSA da assinatura real do invoice como fonte de
-                # verdade — não confia isoladamente no campo opcional "n", que um
-                # LNURLp malicioso poderia forjar por conta própria.
-                dest_pubkey = decode_bolt11_pubkey(bolt11)
+                # Verificar node/identity pubkey de destino ANTES de pagar
+                # (dest_pubkey já resolvido acima — decode_bolt11_pubkey pro
+                # caso LN, ou a pubkey embutida no próprio endereço Spark).
                 if not dest_pubkey:
-                    logger.warning(f"Não foi possível decodificar node pubkey do bolt11 | ln={ln} ip={ip}")
+                    pass
                 elif ln not in config.WHITELIST_ADM and ln not in config.WHITELIST:
                     if is_node_blocked(dest_pubkey):
                         logger.warning(f"Node pubkey bloqueado: {ln} | pubkey={dest_pubkey[:16]}… | ip={ip}")
@@ -2019,9 +2102,12 @@ async def claim(req: ClaimRequest, request: Request):
                 conn.commit()
             raise
 
-        # 5 – Pagar via Phoenix (síncrono — confirma antes de retornar)
+        # 5 – Pagar (síncrono — confirma antes de retornar)
         try:
-            result = await pay_invoice_dispatch(bolt11, claim_id, http_client=http)
+            if dest_kind == "spark":
+                result = await pay_spark_transfer(ln, claim_id, reward_amount, http_client=http)
+            else:
+                result = await pay_invoice_dispatch(bolt11, claim_id, http_client=http)
             payment_hash = result.get("payment_hash", "")
 
             # Persistir status='paid' com retry — se falhar, o registro fica com

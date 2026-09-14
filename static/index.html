@@ -227,11 +227,11 @@
 
     <!-- ETAPA 1: Inserir endereço -->
     <div class="claim-step active" id="step-1">
-      <div class="step-instruction" data-i18n="step1_inst">Passo 1 de 4 — Insira seu Lightning Address</div>
-      <label class="field-label" for="ln-address" data-i18n="field_label">⚡ Lightning Address</label>
+      <div class="step-instruction" data-i18n="step1_inst">Passo 1 de 4 — Insira seu Lightning Address ou endereço Spark</div>
+      <label class="field-label" for="ln-address" data-i18n="field_label">⚡ Lightning Address ou Spark</label>
       <div class="input-wrap">
-        <span class="input-icon">@</span>
-                <input type="text" id="ln-address" data-i18n-placeholder="placeholder" placeholder="voce@wallet.satoshi" autocomplete="off" spellcheck="false"/>
+        <span class="input-icon">⚡</span>
+                <input type="text" id="ln-address" data-i18n-placeholder="placeholder" placeholder="voce@wallet.satoshi ou spark1..." autocomplete="off" spellcheck="false"/>
         <span class="input-status" id="addr-status"></span>
       </div>
       <div id="step1-error" style="display:none;color:var(--red);font-family:var(--mono);font-size:.75rem;margin:6px 0 8px;line-height:1.4;"></div>
@@ -365,16 +365,16 @@ const LANGS = {
   pt: {
     badge:'⚡ Lightning Network Faucet',
     hero_title:'GRÁTIS<br/><em>BITCOIN</em>',
-    hero_desc:'Insira seu Lightning Address, resolva o captcha<br/>e receba sats instantaneamente — sem cadastro.',
+    hero_desc:'Insira seu Lightning Address ou endereço Spark, resolva o captcha<br/>e receba sats instantaneamente — sem cadastro.',
     guide_btn:'Iniciante? Comece por aqui',
     every24h:'a cada 24 horas',
-    field_label:'⚡ Lightning Address',
-    placeholder:'voce@wallet.satoshi',
+    field_label:'⚡ Lightning Address ou Spark',
+    placeholder:'voce@wallet.satoshi ou spark1...',
     claim_btn:'RECEBER SATS',
     next_claim:'PRÓXIMO CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
-    step1_inst:'Passo 1 de 4 — Insira seu Lightning Address',
+    step1_inst:'Passo 1 de 4 — Insira seu Lightning Address ou endereço Spark',
     step2_inst:'Passo 2 de 4 — Confirme que você é humano',
     step3_inst:'Passo 3 de 4 — Prove que você é humano',
     step4_inst:'Passo 4 de 4 — Resolva o captcha e receba seus sats',
@@ -382,7 +382,7 @@ const LANGS = {
     stat_claims:'TOTAL DE CLAIMS',
     stat_balance:'SALDO WALLET',
     how_title:'// COMO FUNCIONA',
-    how1:'<strong>Insira seu Lightning Address</strong> — qualquer wallet compatível (Wallet of Satoshi, Blink, Alby...)',
+    how1:'<strong>Insira seu Lightning Address ou endereço Spark</strong> — qualquer wallet compatível (Wallet of Satoshi, Blink, Alby...) ou um endereço Spark nativo (spark1...)',
     how2:'<strong>Resolva o captcha</strong> — prova de humanidade via hCaptcha',
     how3:'<strong>Receba os sats instantaneamente</strong> — pagamento Lightning direto para sua wallet',
     how4:'<strong>Aguarde 24 horas</strong> — o mesmo address fica bloqueado por 24h para evitar abusos',
@@ -394,8 +394,8 @@ const LANGS = {
     dl_label:'▶ Baixar vídeos sem Ads',
     hdr_paid:'TOTAL PAGO <span id="hdr-sats">…</span> SATS',
     hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
-    err_address:'⚠ Insira seu Lightning Address',
-    err_format:'⚠ Formato inválido — use algo@wallet.com',
+    err_address:'⚠ Insira seu Lightning Address ou endereço Spark',
+    err_format:'⚠ Formato inválido — use algo@wallet.com ou spark1...',
     err_captcha:'⚠ Complete o captcha primeiro',
     err_network:'✗ Erro de rede — tente novamente',
     err_no_balance:'⏳ Faucet sem saldo no momento. Tente novamente em alguns minutos.',
@@ -422,16 +422,16 @@ const LANGS = {
   en: {
     badge:'⚡ Lightning Network Faucet',
     hero_title:'FREE<br/><em>BITCOIN</em>',
-    hero_desc:'Enter your Lightning Address, solve the captcha<br/>and receive sats instantly — no sign-up needed.',
+    hero_desc:'Enter your Lightning Address or Spark address, solve the captcha<br/>and receive sats instantly — no sign-up needed.',
     guide_btn:'Beginner? Start here',
     every24h:'every 24 hours',
-    field_label:'⚡ Lightning Address',
-    placeholder:'you@wallet.satoshi',
+    field_label:'⚡ Lightning Address or Spark',
+    placeholder:'you@wallet.satoshi or spark1...',
     claim_btn:'CLAIM SATS',
     next_claim:'NEXT CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
-    step1_inst:'Step 1 of 4 — Enter your Lightning Address',
+    step1_inst:'Step 1 of 4 — Enter your Lightning Address or Spark address',
     step2_inst:'Step 2 of 4 — Confirm you are human',
     step3_inst:'Step 3 of 4 — Prove you are human',
     step4_inst:'Step 4 of 4 — Solve the captcha and receive your sats',
@@ -439,7 +439,7 @@ const LANGS = {
     stat_claims:'TOTAL CLAIMS',
     stat_balance:'WALLET BALANCE',
     how_title:'// HOW IT WORKS',
-    how1:'<strong>Enter your Lightning Address</strong> — any compatible wallet (Wallet of Satoshi, Blink, Alby...)',
+    how1:'<strong>Enter your Lightning Address or Spark address</strong> — any compatible wallet (Wallet of Satoshi, Blink, Alby...) or a native Spark address (spark1...)',
     how2:'<strong>Solve the captcha</strong> — proof of humanity via hCaptcha',
     how3:'<strong>Receive sats instantly</strong> — Lightning payment directly to your wallet',
     how4:'<strong>Wait 24 hours</strong> — the same address is blocked for 24h to prevent abuse',
@@ -451,8 +451,8 @@ const LANGS = {
     dl_label:'▶ Download videos without Ads',
     hdr_paid:'TOTAL PAID <span id="hdr-sats">…</span> SATS',
     hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
-    err_address:'⚠ Enter your Lightning Address',
-    err_format:'⚠ Invalid format — use something@wallet.com',
+    err_address:'⚠ Enter your Lightning Address or Spark address',
+    err_format:'⚠ Invalid format — use something@wallet.com or spark1...',
     err_captcha:'⚠ Please complete the captcha first',
     err_network:'✗ Network error — please try again',
     err_no_balance:'⏳ Faucet is out of funds. Please try again in a few minutes.',
@@ -479,16 +479,16 @@ const LANGS = {
   es: {
     badge:'⚡ Lightning Network Faucet',
     hero_title:'GRATIS<br/><em>BITCOIN</em>',
-    hero_desc:'Ingresa tu Lightning Address, resuelve el captcha<br/>y recibe sats al instante — sin registro.',
+    hero_desc:'Ingresa tu Lightning Address o dirección Spark, resuelve el captcha<br/>y recibe sats al instante — sin registro.',
     guide_btn:'¿Principiante? Empieza aquí',
     every24h:'cada 24 horas',
-    field_label:'⚡ Lightning Address',
-    placeholder:'tu@wallet.satoshi',
+    field_label:'⚡ Lightning Address o Spark',
+    placeholder:'tu@wallet.satoshi o spark1...',
     claim_btn:'RECIBIR SATS',
     next_claim:'PRÓXIMO CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
-    step1_inst:'Passo 1 de 4 — Insira seu Lightning Address',
+    step1_inst:'Passo 1 de 4 — Insira seu Lightning Address ou endereço Spark',
     step2_inst:'Passo 2 de 4 — Confirme que você é humano',
     step3_inst:'Passo 3 de 4 — Prove que você é humano',
     step4_inst:'Passo 4 de 4 — Resolva o captcha e receba seus sats',
@@ -496,7 +496,7 @@ const LANGS = {
     stat_claims:'TOTAL DE CLAIMS',
     stat_balance:'SALDO WALLET',
     how_title:'// CÓMO FUNCIONA',
-    how1:'<strong>Ingresa tu Lightning Address</strong> — cualquier wallet compatible (Wallet of Satoshi, Blink, Alby...)',
+    how1:'<strong>Ingresa tu Lightning Address o dirección Spark</strong> — cualquier wallet compatible (Wallet of Satoshi, Blink, Alby...) o una dirección Spark nativa (spark1...)',
     how2:'<strong>Resuelve el captcha</strong> — prueba de humanidad via hCaptcha',
     how3:'<strong>Recibe sats al instante</strong> — pago Lightning directo a tu wallet',
     how4:'<strong>Espera 24 horas</strong> — el mismo address queda bloqueado 24h para evitar abusos',
@@ -508,8 +508,8 @@ const LANGS = {
     dl_label:'▶ Descargar videos sin Ads',
     hdr_paid:'TOTAL PAGADO <span id="hdr-sats">…</span> SATS',
     hdr_claims:'CLAIMS <span id="hdr-claims">…</span>',
-    err_address:'⚠ Ingresa tu Lightning Address',
-    err_format:'⚠ Formato inválido — usa algo@wallet.com',
+    err_address:'⚠ Ingresa tu Lightning Address o dirección Spark',
+    err_format:'⚠ Formato inválido — usa algo@wallet.com o spark1...',
     err_captcha:'⚠ Completa el captcha primero',
     err_network:'✗ Error de red — intenta de nuevo',
     err_no_balance:'⏳ Faucet sin saldo por el momento. Intenta en unos minutos.',
@@ -925,6 +925,13 @@ function goStep4() {
     }, 500);
   }
 }
+// LN Address (usuario@dominio.tld) OU endereço Spark nativo (spark1...).
+// Validação de formato só — checksum bech32m de verdade é feito no backend.
+function isValidDestinationFormat(s) {
+  if (!s) return false;
+  if (/^spark1/i.test(s)) return s.length >= 20 && /^[a-z0-9]+$/i.test(s);
+  return /^[^\s@]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(s);
+}
 // ─────────────────────────────────────────────────────────────────────────────
 async function goStep2() {
   const L      = LANGS[currentLang];
@@ -946,9 +953,10 @@ async function goStep2() {
 
   if (!ln) return;
 
-  // Validação de formato: deve ser usuario@dominio.tld
-  const LN_RE = /^[^\s@]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
-  if (!LN_RE.test(ln)) {
+  // Validação de formato: LN Address (usuario@dominio.tld) OU endereço
+  // Spark nativo (spark1...). Checksum/estrutura de verdade são validados
+  // no backend — aqui é só o formato pra dar feedback rápido.
+  if (!isValidDestinationFormat(ln)) {
     showStep1Err(L.err_format);
     return;
   }
@@ -1082,7 +1090,7 @@ async function loadStatus() {
 document.getElementById('ln-address').addEventListener('blur', async function() {
   const ln = this.value.trim();
   const el = document.getElementById('addr-status');
-  if (!ln || !ln.includes('@')) { el.textContent = ''; return; }
+  if (!ln || !isValidDestinationFormat(ln)) { el.textContent = ''; return; }
   el.style.color = 'var(--dim)'; el.textContent = '…';
   try {
     const fpHash = await getBrowserFingerprint();
@@ -1105,7 +1113,7 @@ async function doClaim() {
   const msg = document.getElementById('status-msg');
   msg.className = 'status-msg'; msg.textContent = '';
   if (!ln) { showMsg('error', L.err_address); return; }
-  if (!ln.includes('@')) { showMsg('error', L.err_format); return; }
+  if (!isValidDestinationFormat(ln)) { showMsg('error', L.err_format); return; }
   const captchaToken = hcaptcha.getResponse();
   if (!captchaToken) { showMsg('error', L.err_captcha); return; }
   btn.disabled = true;
