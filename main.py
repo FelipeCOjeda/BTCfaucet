@@ -10,7 +10,7 @@ import ipaddress
 import httpx
 import time as _time
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -117,6 +117,25 @@ async def _assert_public_https_url(url: str) -> None:
                 or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
             logger.warning(f"SSRF bloqueado: {host} resolveu para IP não-público {ip_str}")
             raise HTTPException(400, "LN Address inválido: host não permitido")
+
+async def _get_validating_redirects(client: httpx.AsyncClient, url: str, *, timeout: float = 10, max_redirects: int = 5, **kwargs) -> httpx.Response:
+    """GET que segue 3xx manualmente, validando (via _assert_public_https_url)
+    CADA host de destino antes de seguir pra ele — não só o final.
+
+    Por quê não usar follow_redirects=True: o httpx segue automaticamente sem
+    checar SSRF em nenhum hop, e checar só a URL final não adianta, porque o
+    client já teria se conectado ao host malicioso do hop intermediário antes
+    da checagem acontecer. Por quê não bloquear 3xx inteiramente (como antes):
+    provedores legítimos de LN Address usam redirect pra migrar domínio (ex:
+    speed.app -> appapi.tryspeed.com) — bloquear geral quebra esses casos."""
+    current = url
+    for _ in range(max_redirects):
+        r = await client.get(current, timeout=timeout, follow_redirects=False, **kwargs)
+        if r.status_code not in (301, 302, 303, 307, 308) or "location" not in r.headers:
+            return r
+        current = urljoin(current, r.headers["location"])
+        await _assert_public_https_url(current)
+    raise HTTPException(400, "LN Address inválido: excesso de redirecionamentos")
 
 # ── In-memory rate limiter para endpoints públicos ────────────────────────────
 _rate_store: dict[str, list[float]] = {}
@@ -1245,10 +1264,10 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
         client = http_client or httpx.AsyncClient(timeout=10)
         _owns_client = http_client is None
         try:
-            # follow_redirects=False: um LNURLp malicioso não pode usar um 3xx
-            # pra escapar da checagem de host acima (checamos só a URL final que
-            # nós mesmos montamos — um redirect trocaria o destino sem re-validação)
-            r1 = await client.get(url, timeout=10, follow_redirects=False)
+            # Segue redirect (alguns provedores migraram de domínio, ex:
+            # speed.app -> appapi.tryspeed.com) mas valida cada hop contra
+            # SSRF antes de seguir — ver _get_validating_redirects.
+            r1 = await _get_validating_redirects(client, url, timeout=10)
             if r1.status_code != 200:
                 raise HTTPException(400, "LN Address não encontrado ou indisponível")
             meta = r1.json()
@@ -1266,7 +1285,7 @@ async def resolve_ln_address(address: str, amount_sat: int, http_client: httpx.A
             await _assert_public_https_url(callback)
             metadata = str(meta.get("metadata", ""))
             wallet_hash = compute_wallet_hash(callback, metadata)
-            r2 = await client.get(callback, params={"amount": amount_sat * 1000}, timeout=10, follow_redirects=False)
+            r2 = await _get_validating_redirects(client, callback, timeout=10, params={"amount": amount_sat * 1000})
             data2 = r2.json()
             if data2.get("status") == "ERROR":
                 raise HTTPException(400, data2.get("reason", "Erro ao gerar invoice"))
