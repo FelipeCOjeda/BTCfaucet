@@ -62,6 +62,12 @@ let walletReady = false;
 let walletInitError = null;
 let walletAddress = null;
 
+// Contador de operações de carteira em andamento (/pay, /invoice, /transfer).
+// Exposto em /health como in_flight — usado pelo healthcheck externo pra
+// esperar uma interação de usuário em curso terminar antes de reiniciar o
+// processo, em vez de abortar um pagamento no meio.
+let inFlight = 0;
+
 async function initWallet() {
   const { SparkWallet } = await import('@buildonspark/spark-sdk');
   const seed = bip39.mnemonicToSeedSync(MNEMONIC, PASSPHRASE);
@@ -254,7 +260,7 @@ const server = createServer(async (req, res) => {
   };
 
   if (req.url === '/health' && req.method === 'GET') {
-    return send(200, { ok: true, wallet_ready: walletReady, wallet_init_error: walletInitError });
+    return send(200, { ok: true, wallet_ready: walletReady, wallet_init_error: walletInitError, in_flight: inFlight });
   }
 
   // Sem auth — watch-only via endereço público, nada sensível.
@@ -295,8 +301,13 @@ const server = createServer(async (req, res) => {
       } catch {
         return send(400, { error: 'JSON inválido' });
       }
-      const result = await handlePay(body);
-      return send(result.httpStatus, result.body);
+      inFlight++;
+      try {
+        const result = await handlePay(body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
     });
     return;
   }
@@ -311,8 +322,13 @@ const server = createServer(async (req, res) => {
       } catch {
         return send(400, { error: 'JSON inválido' });
       }
-      const result = await handleInvoice(body);
-      return send(result.httpStatus, result.body);
+      inFlight++;
+      try {
+        const result = await handleInvoice(body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
     });
     return;
   }
@@ -327,8 +343,13 @@ const server = createServer(async (req, res) => {
       } catch {
         return send(400, { error: 'JSON inválido' });
       }
-      const result = await handleTransfer(body);
-      return send(result.httpStatus, result.body);
+      inFlight++;
+      try {
+        const result = await handleTransfer(body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
     });
     return;
   }
