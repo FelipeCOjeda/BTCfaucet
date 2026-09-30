@@ -29,3 +29,15 @@ Anotações - redesign bitcoinfaucet.st (30/09/2026)
 4. Backup
    - index.html anterior salvo em:
      /home/felipe/backups_btcfaucet/index_before_new_20260930_130812/index.html
+
+5. Saldo exibido no index
+   - O site continuava mostrando o saldo do LNbits, que não é mais a carteira
+     usada nos pagamentos do faucet.
+   - Troca para a carteira Spark em modo watch-only:
+     spark1pgss9wzy09la68t7tn2z78pvddy7kpyrucsc2x8gptxfjcyxue4tkqx7u8kefn
+   - main.py: /api/balance agora consulta o sidecar em /balance-public.
+   - spark-sidecar: passou a ler SPARK_WATCH_ONLY_ADDRESS do .env e a responder
+     /balance-public sem depender de wallet_ready (consulta pública, sem chave).
+   - Telegram: /saldo agora aponta para a mesma carteira Spark watch-only.
+   - Aplicado em produção após restart de spark-sidecar.service e ln-faucet.service.
+   - Saldo observado no momento do teste: 19.404 sats.

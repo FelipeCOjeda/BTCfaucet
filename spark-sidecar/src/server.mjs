@@ -35,6 +35,10 @@ const ENV_PATH_NOTE = ENV_PATH;
 
 const MNEMONIC = process.env.SPARK_FAUCET_WALLET_MNEMONIC;
 const PASSPHRASE = process.env.SPARK_FAUCET_WALLET_PASSPHRASE || '';
+// Endereço Spark cujo saldo aparece no site. É watch-only: só consulta
+// saldo público, sem mnemonic/chave. Se ausente, usa o endereço da carteira
+// carregada pelo sidecar (SPARK_FAUCET_WALLET_MNEMONIC).
+const WATCH_ONLY_ADDRESS = process.env.SPARK_WATCH_ONLY_ADDRESS || '';
 const SIDECAR_TOKEN = process.env.SPARK_SIDECAR_TOKEN;
 const PORT = Number(process.env.SPARK_SIDECAR_PORT || 8791);
 const HOST = '127.0.0.1'; // NUNCA mudar pra 0.0.0.0 — carteira com fundos reais.
@@ -61,6 +65,7 @@ let wallet = null;
 let walletReady = false;
 let walletInitError = null;
 let walletAddress = null;
+const wallets = new Map(); // multiwallet: wallet_id -> { wallet, address }
 
 // Contador de operações de carteira em andamento (/pay, /invoice, /transfer).
 // Exposto em /health como in_flight — usado pelo healthcheck externo pra
@@ -81,6 +86,94 @@ async function initWallet() {
   console.log(JSON.stringify({ event: 'wallet_ready', address: walletAddress }));
 }
 
+async function getOrCreateWallet(walletId, mnemonic, passphrase = '') {
+  if (!walletId) throw new Error('wallet_id ausente');
+  if (!mnemonic) throw new Error('mnemonic ausente');
+  const cached = wallets.get(walletId);
+  if (cached) return cached;
+
+  const { SparkWallet } = await import('@buildonspark/spark-sdk');
+  const seed = bip39.mnemonicToSeedSync(mnemonic, passphrase);
+  const { wallet: w } = await SparkWallet.initialize({
+    mnemonicOrSeed: seed,
+    options: { network: 'MAINNET' },
+  });
+  const address = await w.getSparkAddress();
+  const entry = { wallet: w, address };
+  wallets.set(walletId, entry);
+  console.log(JSON.stringify({ event: 'multi_wallet_ready', wallet_id: walletId, address }));
+  return entry;
+}
+
+async function handleWalletCreate(body) {
+  const walletId = String(body.wallet_id || '').trim();
+  if (!walletId) {
+    return { httpStatus: 400, body: { error: 'wallet_id obrigatório' } };
+  }
+  let mnemonic = String(body.mnemonic || '').trim();
+  const generated = !mnemonic;
+  if (generated) mnemonic = bip39.generateMnemonic();
+  try {
+    const entry = await getOrCreateWallet(walletId, mnemonic, body.passphrase || '');
+    return {
+      httpStatus: 200,
+      body: {
+        wallet_id: walletId,
+        spark_address: entry.address,
+        mnemonic: generated ? mnemonic : undefined,
+      },
+    };
+  } catch (err) {
+    console.error(JSON.stringify({ event: 'multi_wallet_create_error', wallet_id: walletId, error: String(err?.message || err) }));
+    return { httpStatus: 502, body: { error: String(err?.message || err) } };
+  }
+}
+
+async function handleWalletInvoice(walletId, body) {
+  const mnemonic = String(body.mnemonic || '').trim();
+  if (!mnemonic) {
+    return { httpStatus: 400, body: { error: 'mnemonic obrigatória pra carteira multiwallet' } };
+  }
+  try {
+    const entry = await getOrCreateWallet(walletId, mnemonic, body.passphrase || '');
+    const amount_sats = Number(body.amount_sats);
+    if (!Number.isInteger(amount_sats) || amount_sats < 1) {
+      return { httpStatus: 400, body: { error: 'amount_sats obrigatório e >= 1' } };
+    }
+    const result = await withTimeout(entry.wallet.createLightningInvoice({
+      amountSats: amount_sats,
+      ...(body.description_hash ? { descriptionHash: body.description_hash } : {}),
+      ...(body.memo ? { memo: body.memo } : {}),
+    }), 12_000, `invoice:${walletId}`);
+    return {
+      httpStatus: 200,
+      body: {
+        bolt11: result.invoice.encodedInvoice,
+        payment_hash: result.invoice.paymentHash,
+        expires_at: result.invoice.expiresAt,
+      },
+    };
+  } catch (err) {
+    console.error(JSON.stringify({ event: 'multi_wallet_invoice_error', wallet_id: walletId, error: String(err?.message || err) }));
+    return { httpStatus: 502, body: { error: String(err?.message || err) } };
+  }
+}
+
+async function handleWalletBalance(walletId, body) {
+  const mnemonic = String(body.mnemonic || '').trim();
+  if (!mnemonic) {
+    return { httpStatus: 400, body: { error: 'mnemonic obrigatória pra carteira multiwallet' } };
+  }
+  try {
+    const entry = await getOrCreateWallet(walletId, mnemonic, body.passphrase || '');
+    const balance = await entry.wallet.getBalance();
+    const sats = Number(balance?.satsBalance?.available ?? balance?.balance ?? 0);
+    return { httpStatus: 200, body: { balance_sats: sats, spark_address: entry.address } };
+  } catch (err) {
+    return { httpStatus: 502, body: { error: String(err?.message || err) } };
+  }
+}
+
 // Consulta watch-only (SparkReadonlyClient.createPublic) — só o endereço
 // PÚBLICO da carteira, nenhuma chave envolvida. Por isso este endpoint não
 // exige X-Sidecar-Token: não há nada sensível em expor o saldo de um endereço
@@ -89,8 +182,12 @@ async function initWallet() {
 async function handleBalancePublic() {
   const { SparkReadonlyClient } = await import('@buildonspark/spark-sdk');
   const client = SparkReadonlyClient.createPublic({ network: 'MAINNET' });
-  const sats = await client.getAvailableBalance(walletAddress);
-  return { address: walletAddress, balance_sats: Number(sats) };
+  const address = WATCH_ONLY_ADDRESS || walletAddress;
+  if (!address) {
+    throw new Error('SPARK_WATCH_ONLY_ADDRESS ausente e carteira Spark não inicializada');
+  }
+  const sats = await client.getAvailableBalance(address);
+  return { address, balance_sats: Number(sats) };
 }
 
 // Status LightningSendRequestStatus que contam como sucesso definitivo.
@@ -265,7 +362,6 @@ const server = createServer(async (req, res) => {
 
   // Sem auth — watch-only via endereço público, nada sensível.
   if (req.url === '/balance-public' && req.method === 'GET') {
-    if (!walletReady) return send(503, { error: 'wallet não inicializada' });
     try {
       return send(200, await handleBalancePublic());
     } catch (err) {
@@ -279,6 +375,74 @@ const server = createServer(async (req, res) => {
   }
   if (!walletReady) {
     return send(503, { error: 'wallet não inicializada', detail: walletInitError });
+  }
+
+  // ── Multiwallet (LN Address dinâmico) ───────────────────────────────────
+  if (req.url === '/internal/wallet' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', async () => {
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return send(400, { error: 'JSON inválido' });
+      }
+      inFlight++;
+      try {
+        const result = await handleWalletCreate(body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
+    });
+    return;
+  }
+
+  const walletInvoiceMatch = req.url.match(/^\/internal\/wallet\/([^/]+)\/invoice$/);
+  if (walletInvoiceMatch && req.method === 'POST') {
+    const walletId = decodeURIComponent(walletInvoiceMatch[1]);
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', async () => {
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return send(400, { error: 'JSON inválido' });
+      }
+      inFlight++;
+      try {
+        const result = await handleWalletInvoice(walletId, body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
+    });
+    return;
+  }
+
+  const walletBalanceMatch = req.url.match(/^\/internal\/wallet\/([^/]+)\/balance$/);
+  if (walletBalanceMatch && req.method === 'POST') {
+    const walletId = decodeURIComponent(walletBalanceMatch[1]);
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', async () => {
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return send(400, { error: 'JSON inválido' });
+      }
+      inFlight++;
+      try {
+        const result = await handleWalletBalance(walletId, body);
+        return send(result.httpStatus, result.body);
+      } finally {
+        inFlight--;
+      }
+    });
+    return;
   }
 
   if (req.url === '/balance' && req.method === 'GET') {

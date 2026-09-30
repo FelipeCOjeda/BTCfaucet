@@ -32,6 +32,10 @@ SPARK_MAX_FEE_SAT = int(os.getenv("SPARK_MAX_FEE_SAT", "10"))
 # double-spend/dreno de carteira), então liga separado — não precisa esperar
 # o cutover de pagamentos pra já dar pra fundar a carteira via LN Address.
 LN_ADDRESS_ENABLED = os.getenv("LN_ADDRESS_ENABLED", "false").lower() == "true"
+# Domínio usado EXCLUSIVAMENTE pelos LN Address (username@dominio). Separado do
+# SITE_URL de propósito: o faucet pode continuar em bitcoinfaucet.st enquanto os
+# LN Address já respondem em origamiseed.com, e a API roda direto (sem Cloudflare).
+LN_ADDRESS_DOMAIN = os.getenv("LN_ADDRESS_DOMAIN", "origamiseed.com").strip().lower().rstrip("/")
 LN_ADDRESS_USERS = {u.strip().lower() for u in os.getenv("LN_ADDRESS_USERS", "doar,donate").split(",") if u.strip()}
 LN_ADDRESS_MIN_SATS = int(os.getenv("LN_ADDRESS_MIN_SATS", "1"))
 LN_ADDRESS_MAX_SATS = int(os.getenv("LN_ADDRESS_MAX_SATS", "1000000"))

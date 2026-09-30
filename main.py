@@ -1022,19 +1022,14 @@ async def lifespan(app: FastAPI):
                     if n_anon:
                         logger.info(f"Cleanup: {n_anon} IP(s) de claims pagos antigos anonimizados (ip_address -> ip_prefix)")
                     app.state.last_archive = _time.time()
-                # Verificar saldo LNvoltz e alertar admin se baixo
+                # Verificar saldo Spark (watch-only) e alertar admin se baixo
                 try:
-                    async with httpx.AsyncClient(timeout=10) as hc:
-                        r = await hc.get(
-                            f"{LNBITS_URL}/api/v1/wallet",
-                            headers={"X-Api-Key": LNBITS_ADMIN_KEY},
-                        )
-                    if r.status_code == 200:
-                        balance_sat = r.json().get("balance", 0) // 1000
+                    balance_sat = await get_spark_balance_sat(app.state.http_client)
+                    if balance_sat is not None and balance_sat < BALANCE_LOW_SAT:
                         since_last = _time.time() - app.state.balance_alert_sent
-                        if balance_sat < BALANCE_LOW_SAT and since_last > BALANCE_ALERT_COOLDOWN:
+                        if since_last > BALANCE_ALERT_COOLDOWN:
                             await send_alert(
-                                f"⚠️ <b>Saldo LNvoltz baixo: {balance_sat} sats</b>\n\n"
+                                f"⚠️ <b>Saldo Spark baixo: {balance_sat} sats</b>\n\n"
                                 f"Limiar: {BALANCE_LOW_SAT} sats\n"
                                 f"Pagamentos podem falhar em breve. Faça top-up."
                             )
@@ -2530,7 +2525,7 @@ async def health():
 @app.get("/api/balance")
 async def api_balance(request: Request):
     """
-    Saldo disponível na wallet LNbits.
+    Saldo disponível na carteira Spark (consulta watch-only via sidecar).
     Exibido no frontend — rate limitado, sem dados sensíveis.
     """
     ip = get_client_ip(request)
@@ -2539,16 +2534,38 @@ async def api_balance(request: Request):
     try:
         http = request.app.state.http_client
         r = await http.get(
-            f"{LNBITS_URL}/api/v1/wallet",
-            headers={"X-Api-Key": LNBITS_ADMIN_KEY},
+            f"{config.SPARK_SIDECAR_URL}/balance-public",
             timeout=5.0,
         )
         if r.status_code == 200:
-            balance_sat = r.json().get("balance", 0) // 1000
+            balance_sat = r.json().get("balance_sats")
             return {"balance_sat": balance_sat, "ok": True}
         return {"balance_sat": None, "ok": False}
-    except Exception:
+    except Exception as e:
+        logger.warning(f"api_balance: consulta Spark falhou: {e}")
         return {"balance_sat": None, "ok": False}
+
+
+async def get_spark_balance_sat(http_client: httpx.AsyncClient = None) -> Optional[int]:
+    """Consulta o saldo watch-only da carteira Spark no sidecar.
+
+    Retorna sats ou None se a consulta falhar. Não exige token porque o
+    endpoint /balance-public só lê saldo de um endereço público.
+    """
+    client = http_client or httpx.AsyncClient(timeout=5.0)
+    owns_client = http_client is None
+    try:
+        r = await client.get(f"{config.SPARK_SIDECAR_URL}/balance-public", timeout=5.0)
+        if r.status_code != 200:
+            return None
+        balance_sats = r.json().get("balance_sats")
+        return int(balance_sats) if isinstance(balance_sats, (int, float)) else None
+    except Exception as e:
+        logger.warning(f"get_spark_balance_sat: consulta Spark falhou: {e}")
+        return None
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 # Serve frontend

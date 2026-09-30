@@ -1024,7 +1024,9 @@ async def handle_message(update: dict) -> Optional[str]:
 
     # ─── WALLET ───────────────────────────────────────────────────────────
     elif cmd == "/saldo":
-        return await _wallet_balance()
+        # Pagamentos do faucet já saem via Spark (não mais LNbits) — /saldo
+        # agora mostra a mesma carteira Spark watch-only que /saldo_spark.
+        return await _spark_balance()
 
     elif cmd == "/saldo_spark":
         return await _spark_balance()
@@ -1093,8 +1095,8 @@ async def handle_message(update: dict) -> Optional[str]:
             "/down - Derruba o faucet\n"
             "/up - Sobe o faucet\n\n"
             "<b>💰 Wallet:</b>\n"
-            "/saldo - Consulta saldo da wallet (LNbits)\n"
-            "/saldo_spark - Consulta saldo da carteira Spark (watch-only)\n"
+            "/saldo - Consulta saldo da carteira Spark (watch-only)\n"
+            "/saldo_spark - Alias de /saldo (mesma carteira Spark)\n"
             "/invoice [sats] - Gera invoice (padrão 2000 sats)\n\n"
             "<b>📊 Monitoramento:</b>\n"
             "/abuse - Abusos nas últimas 6h\n"
