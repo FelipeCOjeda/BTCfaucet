@@ -1,0 +1,31 @@
+Anotações - redesign bitcoinfaucet.st (30/09/2026)
+
+1. Novo layout
+   - index.html substituído pela nova versão (origem: index-new.html).
+   - Visual aplicado com as diretrizes da skill frontend-design (anthropics/skills).
+   - Base "blueprint" azul-escura, grid técnico, accent laranja Bitcoin e ciano de apoio.
+   - Tipografia: Sora (títulos/corpo) + IBM Plex Mono (dados/endereços).
+   - Layout desktop em duas colunas (hero/infos à esquerda, claim à direita).
+   - Todas as funções essenciais mantidas: fluxo de claim em 4 passos, PoW,
+     desafio de texto, hCaptcha, cooldown, fallback WoS, i18n PT/EN/ES,
+     autocomplete e endpoints /api/*.
+
+2. Banners ativos (rotação a cada 10s)
+   - Moshe Internacional -> https://mosheinternacional.com
+   - DIG P2P -> https://vempradig.com/dig?cupom=OJEDA
+   - Depix do Cachorro -> https://cachorrodepix.com/
+   - depix.st -> https://depix.st
+   - ProHash -> https://prohash.com.br/ojeda
+   - Ojedabot -> https://www.t.me/ojedabot
+   - RedotPay -> https://url.hk/i/pt/zitqi
+   Obs.: os arquivos HTML dos banners ficam em static/partners/ (ignorados pelo
+   .gitignore por padrão, então não entram no push; os assets continuam no servidor).
+
+3. Rodapé
+   - "Comprar Bitcoin com PIX" agora aponta para depix.st.
+   - Adicionados: Outras soluções do Ojeda (ojedalabs) e
+     Acervo de Artigos e Vídeos do Ojeda (catalogo-busca).
+
+4. Backup
+   - index.html anterior salvo em:
+     /home/felipe/backups_btcfaucet/index_before_new_20260930_130812/index.html
