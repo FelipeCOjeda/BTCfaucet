@@ -41,3 +41,19 @@ Anotações - redesign bitcoinfaucet.st (30/09/2026)
    - Telegram: /saldo agora aponta para a mesma carteira Spark watch-only.
    - Aplicado em produção após restart de spark-sidecar.service e ln-faucet.service.
    - Saldo observado no momento do teste: 19.404 sats.
+
+6. Gate de patrocinador (01/10/2026)
+   - Passo 4 do claim agora exige clicar no link do parceiro da vez (rodízio de 7).
+   - Backend: /api/sponsor (parceiro da vez) e /api/sponsor/click (registra clique em
+     sponsor_clicks e emite token HMAC single-use, válido de 4s a 15min). /api/claim exige
+     o token (whitelist isenta). Rate limit próprio (sponsor:/sponsor-click:) para não
+     consumir o limite do /api/claim. Desligar: SPONSOR_GATE_ENABLED=false no .env + restart.
+   - Limitação: não prova visita real ao parceiro (bot chama o endpoint); complementa captcha+PoW.
+   - Telegram: /cliques [dias] mostra cliques e claims concluídos por parceiro (testado).
+   - Link do DIG trocado para https://vempradig.com/ref/OJEDA (banners + gate).
+   - Banners: Cache-Control no-cache em /partners/ e ?v= nos iframes (trocar o v= ao mudar link).
+   - static/partners/ agora versionado no git (36 arquivos; removido duplicado spike(1)).
+   - httpx/httpcore em WARNING: token do bot Telegram não vai mais ao journal; token rotacionado.
+   - Análise de abuso 15 dias (16/09-01/10): sem abuso relevante (1 claim/dia por pessoa,
+     poucos fingerprints rotacionando endereço, valores irrisórios).
+   - Backup pré-mudanças: /home/felipe/backups_btcfaucet/pre_sponsor_gate_20261001/
