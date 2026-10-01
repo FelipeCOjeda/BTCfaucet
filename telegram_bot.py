@@ -481,6 +481,46 @@ def _hour_stats() -> str:
         return f"❌ Erro: {e}"
 
 
+def _cliques(days: int = 7) -> str:
+    """Cliques no link obrigatório do parceiro (gate do claim), por parceiro."""
+    days = max(1, min(days, 90))
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT slug, COUNT(*) AS cliques, COALESCE(SUM(consumed), 0) AS concluidos
+                FROM sponsor_clicks
+                WHERE datetime(clicked_at) >= datetime('now', ?)
+                GROUP BY slug ORDER BY cliques DESC
+            """, (f"-{days} days",)).fetchall()
+            perday = conn.execute("""
+                SELECT date(clicked_at) AS d, COUNT(*) AS c
+                FROM sponsor_clicks
+                WHERE datetime(clicked_at) >= datetime('now', ?)
+                GROUP BY d ORDER BY d DESC LIMIT 7
+            """, (f"-{days} days",)).fetchall()
+    except Exception as e:
+        logger.error(f"_cliques erro: {e}")
+        return "❌ Erro ao consultar cliques."
+
+    if not rows:
+        return f"ℹ️ Nenhum clique de parceiro nos últimos {days} dia(s)."
+
+    names = {"partner_moshe": "Moshe Internacional", "dig": "DIG P2P", "depix_cachorro": "Depix do Cachorro",
+             "depix-banner": "depix.st", "prohash": "ProHash", "ojedabot": "Ojedabot", "redotpay": "RedotPay"}
+    total = sum(r["cliques"] for r in rows)
+    done = sum(r["concluidos"] for r in rows)
+    lines = [f"🖱️ <b>Cliques por parceiro — {days} dia(s)</b>",
+             f"Total: <b>{total}</b> cliques · <b>{done}</b> claims concluídos\n"]
+    for r in rows:
+        pct = f"{100 * r['concluidos'] / r['cliques']:.0f}%" if r["cliques"] else "-"
+        lines.append(f"  • {names.get(r['slug'], r['slug'])} — {r['cliques']} cliques ({r['concluidos']} claims, {pct})")
+    if len(perday) > 1:
+        lines.append("\n📅 <b>Por dia (UTC):</b>")
+        for r in perday:
+            lines.append(f"  {r['d']} — {r['c']}")
+    return "\n".join(lines)
+
+
 def _motivo24() -> str:
     """Bloqueios dinâmicos (claims failed) nas últimas 24h + bloqueios manuais recentes."""
     try:
@@ -1048,6 +1088,9 @@ async def handle_message(update: dict) -> Optional[str]:
     elif cmd == "/motivo24":
         return _motivo24()
 
+    elif cmd == "/cliques":
+        return _cliques(int(args[0]) if args and args[0].isdigit() else 7)
+
     # ─── CONSULTA ORPHAN ──────────────────────────────────────────────────────
     elif cmd == "/consulta":
         if not args:
@@ -1102,7 +1145,8 @@ async def handle_message(update: dict) -> Optional[str]:
             "/abuse - Abusos nas últimas 6h\n"
             "/recent - Últimos 10 claims\n"
             "/status - Stats da última hora\n"
-            "/motivo24 - Motivos dos bloqueios (24h)\n\n"
+            "/motivo24 - Motivos dos bloqueios (24h)\n"
+            "/cliques [dias] - Cliques por parceiro (padrão 7 dias)\n\n"
             "<b>🔍 Pagamentos orphan:</b>\n"
             "/consulta &lt;hash&gt; - Verifica no LNbits se foi pago\n"
             "/confirmar &lt;hash&gt; - Marca como paid (sats enviados)\n"
