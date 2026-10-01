@@ -12,7 +12,7 @@ Anotações - redesign bitcoinfaucet.st (30/09/2026)
 
 2. Banners ativos (rotação a cada 10s)
    - Moshe Internacional -> https://mosheinternacional.com
-   - DIG P2P -> https://vempradig.com/dig?cupom=OJEDA
+   - DIG P2P -> https://vempradig.com/ref/OJEDA
    - Depix do Cachorro -> https://cachorrodepix.com/
    - depix.st -> https://depix.st
    - ProHash -> https://prohash.com.br/ojeda

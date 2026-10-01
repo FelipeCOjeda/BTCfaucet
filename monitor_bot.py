@@ -32,6 +32,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("faucet.monitor")
+# httpx/httpcore logam a URL completa em INFO; a API do Telegram leva o token do bot na URL.
+for _n in ("httpx", "httpcore"):
+    logging.getLogger(_n).setLevel(logging.WARNING)
 
 DB_PATH = MONITOR_DB_PATH
 CHECK_INTERVAL = 30

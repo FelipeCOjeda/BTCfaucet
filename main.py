@@ -43,6 +43,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("faucet")
+# httpx/httpcore logam a URL completa em INFO; a API do Telegram leva o token do bot na URL.
+for _n in ("httpx", "httpcore"):
+    logging.getLogger(_n).setLevel(logging.WARNING)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # WHITELIST_ADM     → ignora cooldowns + todos os bloqueios (admin/teste)
@@ -527,6 +530,67 @@ def verify_pow_challenge(seed: str, sig: str, nonce: Optional[int]) -> bool:
     _used_pow_seeds[seed] = ts + POW_MAX_AGE + POW_CLOCK_SKEW
     return True
 
+# ── Gate de patrocinador (clique obrigatório antes do claim) ──────────────────
+# O servidor escolhe o parceiro (rodízio), o cliente abre o link e chama
+# /api/sponsor/click, que devolve um token HMAC (single-use, com idade mínima e
+# máxima). /api/claim exige esse token. Não prova que a pessoa viu o site do
+# parceiro (um bot consegue chamar o endpoint), é um gate de engajamento que
+# complementa captcha + PoW, não os substitui.
+SPONSOR_GATE_ENABLED = os.getenv("SPONSOR_GATE_ENABLED", "true").lower() == "true"
+SPONSOR_TOKEN_MIN_AGE = 4
+SPONSOR_TOKEN_MAX_AGE = 900
+SPONSORS = [
+    {"slug": "partner_moshe",  "name": "Moshe Internacional", "url": "https://mosheinternacional.com"},
+    {"slug": "dig",            "name": "DIG P2P",             "url": "https://vempradig.com/ref/OJEDA"},
+    {"slug": "depix_cachorro", "name": "Depix do Cachorro",   "url": "https://cachorrodepix.com/"},
+    {"slug": "depix-banner",   "name": "depix.st",            "url": "https://depix.st"},
+    {"slug": "prohash",        "name": "ProHash",             "url": "https://prohash.com.br/ojeda"},
+    {"slug": "ojedabot",       "name": "Ojedabot",            "url": "https://www.t.me/ojedabot"},
+    {"slug": "redotpay",       "name": "RedotPay",            "url": "https://url.hk/i/pt/zitqi"},
+]
+_SPONSORS_BY_SLUG = {x["slug"]: x for x in SPONSORS}
+_sponsor_rr = 0
+_used_sponsor_tokens: dict[str, float] = {}
+
+
+def _sponsor_sign(payload: str) -> str:
+    return hmac.new(BANNER_SECRET.encode(), f"sponsor:{payload}".encode(), hashlib.sha256).hexdigest()
+
+
+def next_sponsor() -> dict:
+    global _sponsor_rr
+    sp = SPONSORS[_sponsor_rr % len(SPONSORS)]
+    _sponsor_rr += 1
+    return sp
+
+
+def issue_sponsor_token(slug: str) -> str:
+    payload = f"{int(_time.time())}.{_secrets.token_hex(8)}.{slug}"
+    return f"{payload}.{_sponsor_sign(payload)}"
+
+
+def verify_sponsor_token(token: str, consume: bool = True) -> Optional[str]:
+    """Retorna o slug se o token for válido (assinatura, idade, uso único), senão None."""
+    try:
+        payload, sig = token.rsplit(".", 1)
+        ts_s, _nonce, slug = payload.split(".", 2)
+        ts = int(ts_s)
+    except (ValueError, AttributeError):
+        return None
+    if slug not in _SPONSORS_BY_SLUG or not hmac.compare_digest(_sponsor_sign(payload), sig):
+        return None
+    now = _time.time()
+    if now - ts < SPONSOR_TOKEN_MIN_AGE or now - ts > SPONSOR_TOKEN_MAX_AGE:
+        return None
+    for t, forget_at in list(_used_sponsor_tokens.items()):
+        if forget_at < now:
+            del _used_sponsor_tokens[t]
+    if token in _used_sponsor_tokens:
+        return None
+    if consume:
+        _used_sponsor_tokens[token] = ts + SPONSOR_TOKEN_MAX_AGE + 60
+    return slug
+
 # ── Desafio Anti-Bot ──────────────────────────────────────────────────────────
 CHALLENGE_PHRASES = {
     "bitcoin é liberdade","sats para todos","eu sou humano","chave sua bitcoin",
@@ -936,6 +1000,16 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_node_pubkey ON node_blacklist(pubkey)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sponsor_clicks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug        TEXT NOT NULL,
+                clicked_at  TEXT NOT NULL,
+                ip_prefix   TEXT,
+                consumed    INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sponsor_slug_at ON sponsor_clicks(slug, clicked_at)")
         conn.commit()
 
 def cleanup_stale_pending():
@@ -1066,6 +1140,15 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+# Banners de parceiros mudam de link com frequência: sem Cache-Control o navegador
+# aplica cache heurístico (arquivo antigo = dias sem revalidar) e segue mostrando o link velho.
+@app.middleware("http")
+async def partners_no_cache(request: Request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/partners/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
 # ── User Agent Blacklist ──────────────────────────────────────────────────────
 BOT_UA_PATTERNS = [
     "curl/", "python-requests", "python-httpx", "python/", "python3",
@@ -1175,6 +1258,7 @@ class ClaimRequest(BaseModel):
     pow_nonce:        Optional[int] = None
     pow_seed:         Optional[str] = None
     pow_sig:          Optional[str] = None
+    sponsor_token:    Optional[str] = None
 
 class CheckSuspectRequest(BaseModel):
     ln_address: str = ""
@@ -1643,6 +1727,39 @@ async def api_config(request: Request):
         raise HTTPException(429, "Muitas requisições.")
     return {"hcaptcha_sitekey": HCAPTCHA_SITEKEY, "amount_sat": FAUCET_AMOUNT_SAT, "cooldown_hours": COOLDOWN_HOURS, "cooldown_type": "midnight"}
 
+@app.get("/api/sponsor")
+async def api_sponsor(request: Request):
+    """Parceiro da vez (rodízio) que o usuário deve visitar antes de receber."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(f"sponsor:{ip}", max_req=30, window=60):
+        raise HTTPException(429, "Muitas requisições.")
+    if not SPONSOR_GATE_ENABLED:
+        return {"enabled": False}
+    sp = next_sponsor()
+    return {"enabled": True, "slug": sp["slug"], "name": sp["name"], "url": sp["url"]}
+
+
+class SponsorClickRequest(BaseModel):
+    slug: str
+
+
+@app.post("/api/sponsor/click")
+async def api_sponsor_click(body: SponsorClickRequest, request: Request):
+    """Registra o clique e emite o token exigido por /api/claim."""
+    ip = get_client_ip(request)
+    if not await check_rate_limit(f"sponsor-click:{ip}", max_req=10, window=60):
+        raise HTTPException(429, "Muitas requisições.")
+    if body.slug not in _SPONSORS_BY_SLUG:
+        raise HTTPException(400, "Parceiro inválido.")
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO sponsor_clicks (slug, clicked_at, ip_prefix) VALUES (?,?,?)",
+            (body.slug, datetime.utcnow().isoformat(), normalize_ip_prefix(ip)),
+        )
+        conn.commit()
+    return {"token": issue_sponsor_token(body.slug), "min_wait": SPONSOR_TOKEN_MIN_AGE}
+
+
 @app.get("/api/pow-challenge")
 async def api_pow_challenge(request: Request):
     """Emite um seed de PoW assinado pelo servidor (single-use, expira em 15min)."""
@@ -1901,6 +2018,20 @@ async def claim(req: ClaimRequest, request: Request):
         )
         if block:
             raise HTTPException(429, block["message"])
+
+    # 3b – Gate de patrocinador (após cooldowns: quem está em cooldown não gasta o clique)
+    if SPONSOR_GATE_ENABLED and not _is_whitelisted:
+        _sp_slug = verify_sponsor_token((req.sponsor_token or "").strip())
+        if not _sp_slug:
+            logger.warning(f"Sponsor token ausente/inválido ip={ip} ln={ln}")
+            raise HTTPException(403, "Clique no parceiro patrocinador antes de receber. Recarregue a página e tente novamente.")
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE sponsor_clicks SET consumed=1 WHERE id=(SELECT id FROM sponsor_clicks "
+                "WHERE slug=? AND ip_prefix=? AND consumed=0 ORDER BY id DESC LIMIT 1)",
+                (_sp_slug, ip_prefix),
+            )
+            conn.commit()
 
     # 4 – [FIX #1] Lock exclusivo por LN address — previne race condition / duplo gasto
     acquired = await acquire_claim_lock(ln)

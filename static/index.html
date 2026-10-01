@@ -373,6 +373,12 @@
     <!-- ETAPA 4: Captcha + claim -->
     <div class="claim-step" id="step-4">
       <div class="step-instruction" data-i18n="step4_inst">Passo 4 de 4 — Resolva o captcha e receba seus sats</div>
+      <div id="sponsor-box" style="display:none;margin:0 0 16px;padding:14px;border:1px solid var(--orange);text-align:center;font-family:var(--mono);font-size:.76rem;line-height:1.6;color:var(--dim)">
+        <div id="sponsor-text" style="margin-bottom:10px"></div>
+        <a id="sponsor-link" href="#" target="_blank" rel="noopener sponsored" onclick="sponsorClicked()"
+           style="display:inline-block;background:var(--orange);color:var(--black);padding:8px 18px;text-decoration:none;font-weight:700;letter-spacing:.08em"></a>
+        <div id="sponsor-status" style="margin-top:8px;color:var(--green)"></div>
+      </div>
       <div class="captcha-wrap">
         <div class="h-captcha" id="hcaptcha-widget" data-theme="dark" data-size="normal"></div>
       </div>
@@ -480,6 +486,7 @@ const LANGS = {
     field_label:'⚡ Lightning Address ou Spark',
     placeholder:'voce@wallet.satoshi ou spark1...',
     claim_btn:'RECEBER SATS',
+    sponsor_txt:'Apoie nosso parceiro: abra o link abaixo para liberar o claim.', sponsor_open:'ABRIR', sponsor_ok:'✓ Parceiro visitado — agora resolva o captcha.', err_sponsor:'Clique no parceiro antes de receber.',
     next_claim:'PRÓXIMO CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
@@ -537,6 +544,7 @@ const LANGS = {
     field_label:'⚡ Lightning Address or Spark',
     placeholder:'you@wallet.satoshi or spark1...',
     claim_btn:'CLAIM SATS',
+    sponsor_txt:'Support our partner: open the link below to unlock the claim.', sponsor_open:'OPEN', sponsor_ok:'✓ Partner visited — now solve the captcha.', err_sponsor:'Click the partner link before claiming.',
     next_claim:'NEXT CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
@@ -594,6 +602,7 @@ const LANGS = {
     field_label:'⚡ Lightning Address o Spark',
     placeholder:'tu@wallet.satoshi o spark1...',
     claim_btn:'RECIBIR SATS',
+    sponsor_txt:'Apoya a nuestro socio: abre el enlace para desbloquear el claim.', sponsor_open:'ABRIR', sponsor_ok:'✓ Socio visitado — ahora resuelve el captcha.', err_sponsor:'Haz clic en el socio antes de recibir.',
     next_claim:'PRÓXIMO CLAIM',
     stat_sats:'SATS / CLAIM',
     stat_cooldown:'COOLDOWN',
@@ -1008,6 +1017,7 @@ function goStep4() {
   document.getElementById('step-4').classList.add('active');
   document.getElementById('dot-3').classList.replace('active','done');
   document.getElementById('dot-4').classList.add('active');
+  loadSponsor();
   // Renderizar ou resetar o hCaptcha
   if (typeof hcaptcha !== 'undefined' && sitekeyReady) {
     if (!_captchaRendered) {
@@ -1214,6 +1224,40 @@ document.getElementById('ln-address').addEventListener('blur', async function() 
   } catch(e) { el.textContent=''; }
 });
 
+// ── Gate de patrocinador ──────────────────────────────────────────────────
+let _sponsorEnabled = false, _sponsorSlug = null, _sponsorToken = null, _sponsorReadyAt = 0;
+async function loadSponsor() {
+  _sponsorToken = null; _sponsorReadyAt = 0;
+  const box = document.getElementById('sponsor-box');
+  try {
+    const r = await fetch(`${API}/api/sponsor`);
+    const d = await r.json();
+    if (!r.ok || !d.enabled) { _sponsorEnabled = false; box.style.display = 'none'; return; }
+    const L = LANGS[currentLang];
+    _sponsorEnabled = true; _sponsorSlug = d.slug;
+    document.getElementById('sponsor-text').textContent = L.sponsor_txt;
+    const a = document.getElementById('sponsor-link');
+    a.href = d.url; a.textContent = `${L.sponsor_open}: ${d.name} ↗`;
+    document.getElementById('sponsor-status').textContent = '';
+    box.style.display = 'block';
+  } catch(e) {
+    // Se a API falhar, mantém o gate ligado: o servidor é quem decide.
+    _sponsorEnabled = true;
+  }
+}
+async function sponsorClicked() {
+  // O link abre normalmente em nova aba; aqui só registramos o clique e pegamos o token.
+  if (_sponsorToken) return;
+  try {
+    const r = await fetch(`${API}/api/sponsor/click`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({slug: _sponsorSlug})});
+    const d = await r.json();
+    if (!r.ok) return;
+    _sponsorToken = d.token;
+    _sponsorReadyAt = Date.now() + (d.min_wait || 4) * 1000 + 500;
+    document.getElementById('sponsor-status').textContent = LANGS[currentLang].sponsor_ok;
+  } catch(e) {}
+}
+
 async function doClaim() {
   const L   = LANGS[currentLang];
   const ln  = document.getElementById('ln-address').value.trim();
@@ -1222,6 +1266,8 @@ async function doClaim() {
   msg.className = 'status-msg'; msg.textContent = '';
   if (!ln) { showMsg('error', L.err_address); return; }
   if (!isValidDestinationFormat(ln)) { showMsg('error', L.err_format); return; }
+  if (_sponsorEnabled && !_sponsorToken) { showMsg('error', L.err_sponsor); return; }
+  if (_sponsorEnabled && Date.now() < _sponsorReadyAt) { await new Promise(res => setTimeout(res, _sponsorReadyAt - Date.now())); }
   const captchaToken = hcaptcha.getResponse();
   if (!captchaToken) { showMsg('error', L.err_captcha); return; }
   btn.disabled = true;
@@ -1236,6 +1282,7 @@ async function doClaim() {
       pow_nonce:        _powNonce,
       pow_seed:         _powTarget,
       pow_sig:          _powSig,
+      sponsor_token:    _sponsorToken,
       canvas_hash:      _canvasHash
     })});
     const d = await r.json();
@@ -1265,6 +1312,8 @@ async function doClaim() {
           msg.className = 'status-msg'; msg.textContent = '';
           btn.disabled = false;
           btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
+          hcaptcha.reset();
+          loadSponsor();
           return;
         }
         errMsg = L.err_service;
@@ -1290,6 +1339,8 @@ async function doClaim() {
     btn.innerHTML = `<span class="btn-shimmer"></span>${L.claim_btn}`;
   }
   hcaptcha.reset();
+  // O token de patrocinador é single-use: pede um novo parceiro para a próxima tentativa.
+  loadSponsor();
   // O seed de PoW é single-use: prepara um novo para uma eventual re-tentativa.
   if (document.getElementById('step-3').classList.contains('active')) {
     fetchAndRunPoW();
@@ -1505,7 +1556,8 @@ const PARTNER_SLUGS = [
   'redotpay',
 ];
 
-const makeAds = (size) => PARTNER_SLUGS.map((slug) => `/partners/${slug}-${size}.html`);
+// ?v= força o navegador a baixar o banner novo (troque ao mudar links de parceiros)
+const makeAds = (size) => PARTNER_SLUGS.map((slug) => `/partners/${slug}-${size}.html?v=20261001`);
 
 const ADS_TOP_DESKTOP = makeAds('728x90');
 const ADS_MID_DESKTOP = makeAds('300x250');
