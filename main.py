@@ -542,10 +542,10 @@ SPONSOR_TOKEN_MAX_AGE = 900
 SPONSORS = [
     {"slug": "partner_moshe",  "name": "Moshe Internacional", "url": "https://mosheinternacional.com"},
     {"slug": "dig",            "name": "DIG P2P",             "url": "https://vempradig.com/ref/OJEDA"},
-    {"slug": "depix_cachorro", "name": "Depix do Cachorro",   "url": "https://cachorrodepix.com/"},
+    # removido do rodízio 2026-10-05 (banners mantidos em static/partners/): {"slug": "depix_cachorro", "name": "Depix do Cachorro", "url": "https://cachorrodepix.com/"},
     {"slug": "depix-banner",   "name": "depix.st",            "url": "https://depix.st"},
     {"slug": "prohash",        "name": "ProHash",             "url": "https://prohash.com.br/ojeda"},
-    {"slug": "ojedabot",       "name": "Ojedabot",            "url": "https://www.t.me/ojedabot"},
+    # removido do rodízio 2026-10-05 (banners mantidos em static/partners/): {"slug": "ojedabot", "name": "Ojedabot", "url": "https://www.t.me/ojedabot"},
     {"slug": "redotpay",       "name": "RedotPay",            "url": "https://url.hk/i/pt/zitqi"},
 ]
 _SPONSORS_BY_SLUG = {x["slug"]: x for x in SPONSORS}

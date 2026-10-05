@@ -1549,15 +1549,15 @@ async function doFallbackClaim() {
 const PARTNER_SLUGS = [
   'partner_moshe',
   'dig',
-  'depix_cachorro',
+  // 'depix_cachorro', // removido do rodízio 2026-10-05 (arquivos mantidos em static/partners/)
   'depix-banner',
   'prohash',
-  'ojedabot',
+  // 'ojedabot', // removido do rodízio 2026-10-05 (arquivos mantidos em static/partners/)
   'redotpay',
 ];
 
 // ?v= força o navegador a baixar o banner novo (troque ao mudar links de parceiros)
-const makeAds = (size) => PARTNER_SLUGS.map((slug) => `/partners/${slug}-${size}.html?v=20261001`);
+const makeAds = (size) => PARTNER_SLUGS.map((slug) => `/partners/${slug}-${size}.html?v=20261005`);
 
 const ADS_TOP_DESKTOP = makeAds('728x90');
 const ADS_MID_DESKTOP = makeAds('300x250');
