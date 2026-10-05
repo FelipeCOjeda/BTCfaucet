@@ -17,6 +17,8 @@ from typing import Optional, Tuple
 
 import httpx
 
+import partners
+
 from config import (
     DB_PATH,
     LNBITS_ADMIN_KEY,
@@ -505,8 +507,7 @@ def _cliques(days: int = 7) -> str:
     if not rows:
         return f"ℹ️ Nenhum clique de parceiro nos últimos {days} dia(s)."
 
-    names = {"partner_moshe": "Moshe Internacional", "dig": "DIG P2P", "depix_cachorro": "Depix do Cachorro",
-             "depix-banner": "depix.st", "prohash": "ProHash", "ojedabot": "Ojedabot", "redotpay": "RedotPay"}
+    names = {p["slug"]: p["name"] for p in partners.CATALOG}
     total = sum(r["cliques"] for r in rows)
     done = sum(r["concluidos"] for r in rows)
     lines = [f"🖱️ <b>Cliques por parceiro — {days} dia(s)</b>",
@@ -519,6 +520,38 @@ def _cliques(days: int = 7) -> str:
         for r in perday:
             lines.append(f"  {r['d']} — {r['c']}")
     return "\n".join(lines)
+
+
+def _partners_list() -> str:
+    ps = partners.all_partners()
+    act = [p for p in ps if p["active"]]
+    ina = [p for p in ps if not p["active"]]
+    lines = [f"🤝 <b>Parceiros — rodízio de banners e clique</b>\n", f"✅ <b>Ativos ({len(act)}):</b>"]
+    lines += [f"  • {p['name']}" for p in act] or ["  (nenhum)"]
+    lines.append(f"\n⏸️ <b>Inativos ({len(ina)}):</b>")
+    lines += [f"  • {p['name']}" for p in ina] or ["  (nenhum)"]
+    lines.append("\nUse /activebanner &lt;nome&gt; ou /inactivebanner &lt;nome&gt;")
+    return "\n".join(lines)
+
+
+def _partner_toggle(query: str, active: bool) -> str:
+    cmd = "/activebanner" if active else "/inactivebanner"
+    if not query.strip():
+        return f"❌ Uso: {cmd} &lt;nome do parceiro&gt;\n\n" + _partners_list()
+    hits = partners.find_partners(query)
+    if not hits:
+        return f"❌ Parceiro não encontrado: <code>{query[:40]}</code>\n\n" + _partners_list()
+    if len(hits) > 1:
+        return "❌ Nome ambíguo, seja mais específico: " + ", ".join(h["name"] for h in hits)
+    p = hits[0]
+    now = {x["slug"]: x["active"] for x in partners.all_partners()}[p["slug"]]
+    if now == active:
+        return f"ℹ️ {p['name']} já está {'ativo' if active else 'inativo'}."
+    if not active and sum(1 for x in partners.all_partners() if x["active"]) <= 1:
+        return f"🚫 {p['name']} é o último parceiro ativo — mantenha pelo menos um (o gate de clique depende disso)."
+    partners.set_active(p["slug"], active)
+    logger.info(f"Parceiro {p['slug']} {'ativado' if active else 'desativado'} via Telegram")
+    return f"{'✅ Ativado' if active else '⏸️ Desativado'}: <b>{p['name']}</b> (banner + clique). Efeito imediato.\n\n" + _partners_list()
 
 
 def _motivo24() -> str:
@@ -1091,6 +1124,15 @@ async def handle_message(update: dict) -> Optional[str]:
     elif cmd == "/cliques":
         return _cliques(int(args[0]) if args and args[0].isdigit() else 7)
 
+    elif cmd == "/partners":
+        return _partners_list()
+
+    elif cmd == "/activebanner":
+        return _partner_toggle(" ".join(args), True)
+
+    elif cmd == "/inactivebanner":
+        return _partner_toggle(" ".join(args), False)
+
     # ─── CONSULTA ORPHAN ──────────────────────────────────────────────────────
     elif cmd == "/consulta":
         if not args:
@@ -1146,7 +1188,10 @@ async def handle_message(update: dict) -> Optional[str]:
             "/recent - Últimos 10 claims\n"
             "/status - Stats da última hora\n"
             "/motivo24 - Motivos dos bloqueios (24h)\n"
-            "/cliques [dias] - Cliques por parceiro (padrão 7 dias)\n\n"
+            "/cliques [dias] - Cliques por parceiro (padrão 7 dias)\n"
+            "/partners - Lista parceiros ativos/inativos\n"
+            "/activebanner &lt;nome&gt; - Ativa parceiro (banner + clique)\n"
+            "/inactivebanner &lt;nome&gt; - Desativa parceiro\n\n"
             "<b>🔍 Pagamentos orphan:</b>\n"
             "/consulta &lt;hash&gt; - Verifica no LNbits se foi pago\n"
             "/confirmar &lt;hash&gt; - Marca como paid (sats enviados)\n"

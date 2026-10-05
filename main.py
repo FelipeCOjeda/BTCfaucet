@@ -34,6 +34,7 @@ from config import (
     BANNER_SECRET,
 )
 
+import partners
 from telegram_bot import run_monitor, send_alert, poll_commands, run_orphan_check, run_farm_check
 from spark_address import validate_spark_address
 
@@ -539,16 +540,10 @@ def verify_pow_challenge(seed: str, sig: str, nonce: Optional[int]) -> bool:
 SPONSOR_GATE_ENABLED = os.getenv("SPONSOR_GATE_ENABLED", "true").lower() == "true"
 SPONSOR_TOKEN_MIN_AGE = 4
 SPONSOR_TOKEN_MAX_AGE = 900
-SPONSORS = [
-    {"slug": "partner_moshe",  "name": "Moshe Internacional", "url": "https://mosheinternacional.com"},
-    {"slug": "dig",            "name": "DIG P2P",             "url": "https://vempradig.com/ref/OJEDA"},
-    # removido do rodízio 2026-10-05 (banners mantidos em static/partners/): {"slug": "depix_cachorro", "name": "Depix do Cachorro", "url": "https://cachorrodepix.com/"},
-    {"slug": "depix-banner",   "name": "depix.st",            "url": "https://depix.st"},
-    {"slug": "prohash",        "name": "ProHash",             "url": "https://prohash.com.br/ojeda"},
-    # removido do rodízio 2026-10-05 (banners mantidos em static/partners/): {"slug": "ojedabot", "name": "Ojedabot", "url": "https://www.t.me/ojedabot"},
-    {"slug": "redotpay",       "name": "RedotPay",            "url": "https://url.hk/i/pt/zitqi"},
-]
-_SPONSORS_BY_SLUG = {x["slug"]: x for x in SPONSORS}
+# Catálogo e estado ativo/inativo em partners.py (controlado via /partners,
+# /activebanner e /inactivebanner no Telegram). Tokens/cliques valem para
+# qualquer slug do catálogo; só o rodízio considera apenas os ativos.
+_SPONSORS_BY_SLUG = partners.BY_SLUG
 _sponsor_rr = 0
 _used_sponsor_tokens: dict[str, float] = {}
 
@@ -559,7 +554,8 @@ def _sponsor_sign(payload: str) -> str:
 
 def next_sponsor() -> dict:
     global _sponsor_rr
-    sp = SPONSORS[_sponsor_rr % len(SPONSORS)]
+    pool = partners.active_partners() or [p for p in partners.CATALOG if p["default_active"]]
+    sp = pool[_sponsor_rr % len(pool)]
     _sponsor_rr += 1
     return sp
 
@@ -1726,6 +1722,12 @@ async def api_config(request: Request):
     if not await check_rate_limit(ip, max_req=30, window=60):
         raise HTTPException(429, "Muitas requisições.")
     return {"hcaptcha_sitekey": HCAPTCHA_SITEKEY, "amount_sat": FAUCET_AMOUNT_SAT, "cooldown_hours": COOLDOWN_HOURS, "cooldown_type": "midnight"}
+
+@app.get("/api/partners")
+async def api_partners():
+    """Slugs dos parceiros ativos no rodízio de banners (lido pelo front)."""
+    return {"slugs": [p["slug"] for p in partners.active_partners()]}
+
 
 @app.get("/api/sponsor")
 async def api_sponsor(request: Request):

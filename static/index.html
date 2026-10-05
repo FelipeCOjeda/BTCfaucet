@@ -1543,7 +1543,7 @@ async function doFallbackClaim() {
 
 <script>
 // ── Ad Rotation System ──────────────────────────────────────────────
-// Para trocar os parceiros, basta editar esta lista. Cada slug precisa ter
+// Lista de reserva (fallback se /api/partners falhar). O controle real é via Telegram (/partners). Cada slug precisa ter
 // os três arquivos em /partners/<slug>-728x90.html,
 // /partners/<slug>-300x250.html e /partners/<slug>-320x100.html.
 const PARTNER_SLUGS = [
@@ -1557,23 +1557,22 @@ const PARTNER_SLUGS = [
 ];
 
 // ?v= força o navegador a baixar o banner novo (troque ao mudar links de parceiros)
-const makeAds = (size) => PARTNER_SLUGS.map((slug) => `/partners/${slug}-${size}.html?v=20261005`);
+let ACTIVE_SLUGS = PARTNER_SLUGS;
+const makeAds = (size) => ACTIVE_SLUGS.map((slug) => `/partners/${slug}-${size}.html?v=20261005`);
 
-const ADS_TOP_DESKTOP = makeAds('728x90');
-const ADS_MID_DESKTOP = makeAds('300x250');
-const ADS_TOP_MOBILE  = makeAds('320x100');
-const ADS_MID_MOBILE  = makeAds('300x250');
+let ADS_TOP, ADS_MID;
+function buildAds() {
+  ADS_TOP = isMobile() ? makeAds('320x100') : makeAds('728x90');
+  ADS_MID = makeAds('300x250');
+}
 
 // Detect if mobile (screen width < 768px)
 const isMobile = () => window.innerWidth < 768;
 
-// Select appropriate banner set
-const ADS_TOP = isMobile() ? ADS_TOP_MOBILE : ADS_TOP_DESKTOP;
-const ADS_MID = isMobile() ? ADS_MID_MOBILE : ADS_MID_DESKTOP;
 
 // Start from a random position so partners rotate on each visit
-let topIdx = Math.floor(Math.random() * ADS_TOP.length);
-let midIdx = topIdx; // keep top and mid in sync
+let topIdx = 0;
+let midIdx = 0; // keep top and mid in sync
 
 function rotateAds() {
   const topFrame = document.getElementById('ad-top-frame');
@@ -1585,8 +1584,20 @@ function rotateAds() {
 }
 
 // Start immediately, then rotate every 10s
-rotateAds();
-setInterval(rotateAds, 10000);
+// Lista ativa vem do servidor (controlada via /partners no Telegram); se falhar, usa a lista fixa acima.
+async function initAds() {
+  try {
+    const r = await fetch('/api/partners', {cache: 'no-store'});
+    const d = await r.json();
+    if (Array.isArray(d.slugs) && d.slugs.length) ACTIVE_SLUGS = d.slugs.filter((x) => /^[\w-]+$/.test(x));
+  } catch (e) {}
+  buildAds();
+  topIdx = Math.floor(Math.random() * ADS_TOP.length);
+  midIdx = topIdx;
+  rotateAds();
+  setInterval(rotateAds, 10000);
+}
+initAds();
 </script>
 
 <script>

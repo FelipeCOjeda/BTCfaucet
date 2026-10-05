@@ -57,3 +57,19 @@ Anotações - redesign bitcoinfaucet.st (30/09/2026)
    - Análise de abuso 15 dias (16/09-01/10): sem abuso relevante (1 claim/dia por pessoa,
      poucos fingerprints rotacionando endereço, valores irrisórios).
    - Backup pré-mudanças: /home/felipe/backups_btcfaucet/pre_sponsor_gate_20261001/
+
+7. Controle de parceiros pelo Telegram (05/10/2026)
+   - Novo partners.py: catálogo de 12 parceiros (slug/nome/url/default_active) + estado
+     ativo/inativo na tabela partner_status do faucet.db (sem linha = default_active).
+   - Telegram: /partners (lista ativos/inativos), /activebanner <nome>, /inactivebanner <nome>.
+     Busca por nome/slug sem acento/caixa; nome ambíguo pede mais precisão; recusa desativar
+     o último ativo (gate de clique depende de >=1). Efeito imediato, sem restart.
+   - Ativo = entra no rodízio de banners E no rodízio do clique (next_sponsor). Token de clique
+     já emitido segue válido até 15min mesmo se o parceiro for desativado.
+   - Front: lê GET /api/partners ao carregar (fallback = PARTNER_SLUGS fixo no HTML).
+   - Ativos: Moshe, DIG P2P, depix.st, ProHash, RedotPay.
+     Inativos (arquivos mantidos em static/partners/): Depix do Cachorro, Ojedabot, Amulets,
+     PixGo, Satsfaction, Spike, Tangem (banner do Tangem aponta p/ prohash.com.br/ojeda).
+   - Novo parceiro: adicionar em partners.py (+ 3 banners <slug>-728x90/300x250/320x100.html).
+   - /cliques usa nomes do catálogo. ln-faucet.service reiniciado.
+   - Backup pré-mudança: /home/felipe/claudebkp/btcfaucet_pre_cachorro_20261005_152756/
