@@ -312,7 +312,7 @@ async function handlePay(body) {
     // `instanceof`, não formato de string) — passar a string crua falha com
     // "Transfer ID must be a UUID" mesmo sendo um UUID sintaticamente válido.
     // A classe vem do pacote uuidv7 (dependência do próprio spark-sdk).
-    // Timeout generoso (45s): pagamentos legítimos podem levar um tempo
+    // Timeout generoso (30s): pagamentos legítimos podem levar um tempo
     // (routing real). Um timeout aqui cai no catch abaixo, que já trata
     // como 'pending' — seguro, nunca marca como failed indevidamente.
     const payParams = {
@@ -321,7 +321,7 @@ async function handlePay(body) {
       transferId: UUID.parse(transferId),
       ...(amount_sats_to_send ? { amountSatsToSend: Number(amount_sats_to_send) } : {}),
     };
-    let result = await withTimeout(wallet.payLightningInvoice(payParams), 20_000, 'payLightningInvoice');
+    let result = await withTimeout(wallet.payLightningInvoice(payParams), 30_000, 'payLightningInvoice');
     let classified = classifyResult(result);
 
     // [FIX] payLightningInvoice frequentemente resolve a Promise ainda em
@@ -331,10 +331,10 @@ async function handlePay(body) {
     // dinheiro saiu certo, mas o site mostrou "serviço indisponível").
     // Reconsulta com o MESMO transferId (idempotente — nunca reenvia) até
     // sair de 'pending' ou esgotar o orçamento de tempo. Orçado pra caber
-    // dentro do timeout de 90s que o main.py dá pra chamada HTTP inteira.
+    // dentro do timeout de 180s que o main.py dá pra chamada HTTP inteira.
     for (let attempt = 0; classified.status === 'pending' && attempt < 5; attempt++) {
       await new Promise((r) => setTimeout(r, 2_000));
-      result = await withTimeout(wallet.payLightningInvoice(payParams), 8_000, 'payLightningInvoice (poll)');
+      result = await withTimeout(wallet.payLightningInvoice(payParams), 20_000, 'payLightningInvoice (poll)');
       classified = classifyResult(result);
     }
 

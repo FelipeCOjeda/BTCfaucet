@@ -1408,22 +1408,45 @@ async def pay_invoice_spark(bolt11: str, claim_id, http_client: httpx.AsyncClien
     diferente do LNbits onde tivemos que implementar isso manualmente.
     """
     payment_hash = decode_bolt11_payment_hash(bolt11) or ""
-    client = http_client or httpx.AsyncClient(timeout=90)
+    client = http_client or httpx.AsyncClient(timeout=180)
     _owns_client = http_client is None
     try:
-        try:
-            r = await client.post(
-                f"{config.SPARK_SIDECAR_URL}/pay",
-                json={"claim_id": claim_id, "invoice": bolt11, "max_fee_sats": config.SPARK_MAX_FEE_SAT},
-                headers={"X-Sidecar-Token": config.SPARK_SIDECAR_TOKEN},
-                timeout=90,
+        r = None
+        last_error = ""
+        # O sidecar pode reiniciar sozinho quando o heartbeat da SDK detecta que
+        # a conexão Spark travou. Nesse intervalo a porta pode recusar conexão ou
+        # responder 503 (wallet ainda não pronta). Como transferId é determinístico
+        # a partir do claim_id, retentar aqui nunca duplica o pagamento.
+        for attempt in range(7):
+            try:
+                r = await client.post(
+                    f"{config.SPARK_SIDECAR_URL}/pay",
+                    json={"claim_id": claim_id, "invoice": bolt11, "max_fee_sats": config.SPARK_MAX_FEE_SAT},
+                    headers={"X-Sidecar-Token": config.SPARK_SIDECAR_TOKEN},
+                    timeout=180,
+                )
+                if r.status_code not in (502, 503):
+                    break
+                last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+            except httpx.HTTPError as e:
+                last_error = f"{type(e).__name__}: {e or repr(e)}"
+            except asyncio.CancelledError:
+                logger.error(f"pay_invoice_spark: chamada cancelada com pagamento em voo (claim {claim_id})")
+                raise PaymentInitiatedError(payment_hash)
+
+            logger.warning(
+                f"pay_invoice_spark: tentativa {attempt + 1}/7 com sidecar indisponível/degradado "
+                f"(claim {claim_id}): {last_error}"
             )
-        except (httpx.HTTPError, asyncio.CancelledError) as e:
-            # Não sabemos se o sidecar chegou a chamar payLightningInvoice —
-            # como o transferId é determinístico (claim_id), é seguro tratar
-            # como incerto: uma futura tentativa com o mesmo claim_id não
-            # duplica o pagamento no backend da Spark.
-            logger.error(f"pay_invoice_spark: erro de conexão com o sidecar (claim {claim_id}): {e}")
+            if attempt == 6:
+                logger.error(
+                    f"pay_invoice_spark: erro de conexão com o sidecar após 7 tentativas "
+                    f"(claim {claim_id}): {last_error}"
+                )
+                raise PaymentInitiatedError(payment_hash)
+            await asyncio.sleep(2 ** attempt)
+
+        if r is None:
             raise PaymentInitiatedError(payment_hash)
 
         if r.status_code == 400:
@@ -1431,8 +1454,6 @@ async def pay_invoice_spark(bolt11: str, claim_id, http_client: httpx.AsyncClien
         if r.status_code == 401:
             logger.critical("pay_invoice_spark: SPARK_SIDECAR_TOKEN inválido — checar .env dos dois lados")
             raise HTTPException(503, "Serviço de pagamento indisponível.")
-        if r.status_code == 503:
-            raise PaymentInitiatedError(payment_hash)
 
         data = r.json()
         status = data.get("status")
